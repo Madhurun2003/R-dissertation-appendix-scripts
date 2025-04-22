@@ -1,0 +1,60 @@
+
+################################################################################
+################### Obtain and filter natural compound dataset ###################
+################################################################################
+
+## -----------------------------------------------------------------------------
+library(readr)
+library(dplyr)
+
+neuro_data <- read_delim("outputs/DOWNLOAD-TkaaDMl2sD0VjyXBF5pnNoJTiPv0XWyT2EdO_uXvwnM=.csv", delim = ";", col_names = TRUE, escape_double = FALSE, skip_empty_rows = TRUE)
+
+# Select the required columns
+np_data_clean <- neuro_data %>%
+  select(`ChEMBL ID`, Name, `Molecular Weight`, AlogP, Smiles, `HBA (Lipinski)`, `HBD (Lipinski)`, `Polar Surface Area` )
+
+# Remove rows with missing or empty SMILES
+np_data_clean <- np_data_clean %>%
+  filter(!is.na(Smiles) & Smiles != "")
+
+# Make necessary columns numeric
+np_data_clean <- np_data_clean %>%
+  mutate(`Molecular Weight` = as.numeric(`Molecular Weight`),
+         AlogP = as.numeric(AlogP))
+
+# Remove duplicate compounds
+np_data_clean <- np_data_clean %>%
+  distinct(Smiles, .keep_all = TRUE)
+
+# Filter by MW
+np_data_clean <- np_data_clean %>%
+  filter(`Molecular Weight` <= 900)
+
+# Filter according to Lipinki's rule of 5, however keep the threshold relaxed for MW
+np_data_clean <- np_data_clean %>%
+  filter(`HBA (Lipinski)`<= 5, `HBD (Lipinski)` <= 10, `Polar Surface Area` < 140, `AlogP` <= 6)
+
+#' 
+
+################################################################################
+## Remove overlapping compounds between 'natural' and 'synthetic' chembl dataset ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load the synthetic ChemBL dataset (to filter out overlapping compounds)
+synthetic_data <- read_csv("datasets/Neuroprotectives/cleaned_CHEMBLcompounds_neuroprotectives_final.csv", show_col_types = FALSE) %>%
+  select(Chembl_ID)
+
+# Select key columns in natural dataset for filtering
+np_data <- np_data_clean %>%
+  select(`ChEMBL ID`, Name, Smiles) %>%  # Keep only relevant columns
+  filter(!is.na(Smiles) & Smiles != "")   # Remove invalid SMILES
+
+# Remove compounds present in the synthetic dataset (by ChemBL ID)
+np_data <- np_data %>%
+  filter(!(`ChEMBL ID` %in% synthetic_data$Chembl_ID))
+
+# Save the cleaned natural product dataset to a CSV file
+write_csv(np_data, "outputs/cleaned_natural_np_data.csv")
+
+

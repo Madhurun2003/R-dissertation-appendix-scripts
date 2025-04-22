@@ -1,0 +1,61 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required libraries
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(ranger)
+library(rcdk)
+library(fingerprint)
+
+
+#' 
+
+################################################################################
+#### Train RF model on all of the 'synthetic' chembl neuroprotective dataset #####
+################################################################################
+
+## -----------------------------------------------------------------------------
+# For each fingerprint type, train an RF model on the entire neuroprotective dataset and save the final model
+neuroprotective_rf_models <- list()
+
+# Define the fingerprint types
+fingerprint_types <- c("pubchem", "maccs", "extended")
+
+for (fp_type in fingerprint_types) {
+  cat(sprintf("\nTraining Neuroprotective RF model for fingerprint type: %s\n", fp_type))
+  
+  # Load the neuroprotective fingerprint datasets
+  neuro_fp <- read_csv(sprintf("outputs/neuroprotective_%s_fingerprints.csv", fp_type), show_col_types = FALSE)
+  
+  # Convert 'Actual_Activity' to a factor 
+  neuro_fp$Actual_Activity <- as.factor(neuro_fp$Actual_Activity)
+  
+  # Identify fingerprint predictor columns 
+  fp_columns <- grep("^FP", colnames(neuro_fp), value = TRUE)
+  
+  # Train the Random Forest model on 100% of the neuroprotective data
+  RF_model <- ranger(
+    Actual_Activity ~ .,
+    data = neuro_fp[, c("Actual_Activity", fp_columns)],
+    probability = TRUE,
+    num.trees = 500,          
+    importance = "impurity",   # To compute variable importance
+    seed = 42                  # Reproducibility
+  )
+  
+  # Store the trained model in a list
+  neuroprotective_rf_models[[fp_type]] <- RF_model
+  
+  # Save the trained model to an RDS file
+  saveRDS(RF_model, sprintf("models/neuroprotective-RF-Model-%s.rds", fp_type))
+  cat(sprintf("Neuroprotective RF model for %s saved.\n", fp_type))
+}
+
+

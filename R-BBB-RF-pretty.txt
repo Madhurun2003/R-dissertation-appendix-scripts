@@ -1,0 +1,235 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required packages
+library(ranger)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+
+
+################################################################################
+######################### Create lists to store results ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Initialise empty lists to store outputs for each fingerprint type
+all_stats <- list()              # Performance metrics for each model
+all_conf_matrices <- list()      # Confusion matrices from validation sets
+combined_mean_tpr <- list()      # Mean TPR values across runs
+combined_mean_fpr <- list()      # Mean FPR values across runs
+auc_info <- list()               # Stores mean and SD for ROC AUC
+
+#' 
+
+################################################################################
+############# Train and run 70/30 Random Forest model on BBB Dataset #############
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types to process (PubChem, Extended, MACCS)
+# These fingerprints are used as molecular descriptors for classification
+FPtypes <- c("pubchem", "extended", "maccs")
+
+# Loop over each fingerprint type
+for (FPtype in FPtypes) {
+  cat(sprintf("Processing fingerprint type: %s\n", FPtype))
+  
+  # Load the appropriate dataset for the given fingerprint
+  fIN <- sprintf("datasets/BBBp/BBBp-%s.csv", FPtype)
+  d <- read.csv(fIN)
+  
+  # Remove compound name column and any rows with missing data
+  d <- d[, 2:ncol(d)]
+  d <- na.omit(d)
+  
+  # Convert binary label column to factor for classification
+  d$p_np <- as.factor(d$p_np)
+  
+  # Define number of iterations for model training and evaluation
+  n_iter <- 5
+  
+  # Initialise matrix to store evaluation metrics for each run
+  stats <- matrix(0, nrow = n_iter + 2, ncol = 5)
+  colnames(stats) <- c("ROC_AUC", "AUPR", "Sensitivity", "Specificity", "Accuracy")
+  rownames(stats) <- c(paste0("Run_", 1:n_iter), "Mean", "SD")
+  
+  # Initialise lists to store ROC curves
+  all_tpr <- list()
+  all_fpr <- list()
+  all_conf_matrices[[FPtype]] <- list()
+  
+  # Begin training/evaluation loop
+  for (iteration in 1:n_iter) {
+    cat(sprintf("Iteration %d\n", iteration))
+    
+    # Randomly split into training (70%) and validation (30%) sets
+    set.seed(123 + iteration)
+    train <- sample(nrow(d), 0.7 * nrow(d), replace = FALSE)
+    TrainSet <- d[train, ]
+    ValidSet <- d[-train, ]
+    
+    # Train Random Forest model using ranger
+    RF <- ranger(
+      p_np ~ ., 
+      data = TrainSet, 
+      importance = "impurity",  
+      probability = TRUE         # Output class probabilities
+    )
+    
+    # Predict on validation set
+    predValid <- predict(RF, ValidSet)$predictions
+    predClassValid <- ifelse(predValid[, 2] > 0.5, 1, 0)  # Convert probs to binary classes
+    
+    # Compute confusion matrix
+    confusion_matrix <- table(Predicted = predClassValid, Actual = as.numeric(ValidSet$p_np) - 1)
+    print(sprintf("Confusion Matrix for %s - Run %d:", FPtype, iteration))
+    print(confusion_matrix)
+    
+    # Compute performance metrics
+    sensitivity <- confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+    specificity <- confusion_matrix[1, 1] / sum(confusion_matrix[, 1])
+    accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+    
+    # Prepare ROC and PR data
+    R <- data.frame(Actual = as.numeric(ValidSet$p_np) - 1, Predicted = predValid[, 2])
+    R <- R[order(-R$Predicted), ]
+    PN <- sum(R$Actual == 1)
+    N <- nrow(R)
+    
+    # Compute ROC Curve: TPR and FPR
+    TPR <- cumsum(R$Actual == 1) / PN
+    FPR <- cumsum(R$Actual == 0) / (N - PN)
+    
+    # Calculate AUC using trapezoidal rule
+    ROC_AUC <- sum(diff(FPR) * TPR[-length(TPR)])
+    
+    # Compute PR curve metrics and AUPR
+    precision <- cumsum(R$Actual == 1) / (1:N)
+    recall <- cumsum(R$Actual == 1) / PN
+    delta_recall <- diff(c(0, recall))
+    AUPR <- sum(precision * delta_recall)
+    
+    # Save run metrics
+    stats[iteration, ] <- c(ROC_AUC, AUPR, sensitivity, specificity, accuracy)
+    all_tpr[[iteration]] <- TPR
+    all_fpr[[iteration]] <- FPR
+  }
+  
+  # Compute and save mean/SD for each metric across runs
+  stats[n_iter + 1, ] <- colMeans(stats[1:n_iter, ])
+  stats[n_iter + 2, ] <- apply(stats[1:n_iter, ], 2, sd)
+  all_stats[[FPtype]] <- stats
+  
+  # Save results for each fingerprint type to CSV
+  write.csv(stats, file = sprintf("outputs/BBB_RF_stats_%s.csv", FPtype), row.names = TRUE)
+  
+  # Store average ROC curve values for plotting
+  mean_tpr <- Reduce("+", all_tpr) / n_iter
+  mean_fpr <- Reduce("+", all_fpr) / n_iter
+  combined_mean_tpr[[FPtype]] <- mean_tpr
+  combined_mean_fpr[[FPtype]] <- mean_fpr
+  auc_info[[FPtype]] <- c(mean = stats[n_iter + 1, 1], sd = stats[n_iter + 2, 1])
+}
+
+#' 
+
+################################################################################
+################################ Draw ROC curves #################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+png("outputs/Combined_ROC_Curves.png", width = 8, height = 6, units = "in", res = 300)
+
+# Set margins and font sizes for a clean presentation
+par(mar = c(5, 6, 2, 2) + 0.1, cex.lab = 1.8, cex.axis = 1.6)
+
+colours <- c("blue", "red", "green")
+
+# Create the plotting frame without a main title
+plot(NULL, xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "False Positive Rate (FPR)",
+     ylab = "True Positive Rate (TPR)", main = "")
+
+# Draw ROC curves with thick lines for each fingerprint type
+for (i in seq_along(FPtypes)) {
+  lines(combined_mean_fpr[[FPtypes[i]]], combined_mean_tpr[[FPtypes[i]]],
+        col = colours[i], lwd = 5)
+}
+
+# Display the legend with enlarged text and matching line widths
+legend("bottomright",
+       legend = sapply(FPtypes, function(fp) sprintf("%s: %.3f ± %.3f", fp, auc_info[[fp]]["mean"], auc_info[[fp]]["sd"])),
+       col = colours, lwd = 5, cex = 1.6, bty = "n", title = NULL)
+
+dev.off()
+
+
+
+################################################################################
+############################ Save Performance metrics ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Save Combined Results Table
+
+combined_bbb_stats <- do.call(rbind, lapply(names(all_stats), function(fp) {
+  data.frame(
+    Fingerprint = fp,
+    Metric = rownames(all_stats[[fp]]),
+    all_stats[[fp]]
+  )
+}))
+
+# Write to CSV and print message
+write_csv(combined_bbb_stats, "outputs/BBB_RF_Combined_Evaluation.csv")
+print(combined_bbb_stats)
+print("BBB RF model training and validation completed successfully.")
+
+
+#' 
+
+################################################################################
+######################### Carry out statistical analysis #########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Statistical Comparison of AUCs (Friedman + Nemenyi)
+
+run_data <- combined_bbb_stats %>% 
+  filter(grepl("^Run_", Metric)) %>% 
+  select(Fingerprint, Metric, ROC_AUC)
+
+# Reshape into wide format: runs as rows, fingerprints as columns
+auc_wide <- run_data %>%
+  pivot_wider(names_from = Fingerprint, values_from = ROC_AUC)
+
+# Convert to matrix for statistical testing
+auc_matrix <- as.matrix(auc_wide[,-1])
+rownames(auc_matrix) <- auc_wide$Metric
+colnames(auc_matrix) <- c("maccs", "extended", "pubchem")
+
+# Friedman test (non-parametric test for repeated measures)
+friedman_result <- friedman.test(auc_matrix)
+print(friedman_result)
+
+# Post-hoc Nemenyi test to compare all pairs
+library(PMCMRplus)
+result_nemenyi <- frdAllPairsNemenyiTest(auc_matrix)
+print(result_nemenyi)
+
+
+#' 
+## -----------------------------------------------------------------------------
+library(knitr)
+purl("scripts/random_forests/R-BBB-RF.Rmd", output = "scripts_txt/random_forests/R-BBB-RF.R", documentation = 0)
+
+#' 
+#' 
+#' 
+#' 
+#' 

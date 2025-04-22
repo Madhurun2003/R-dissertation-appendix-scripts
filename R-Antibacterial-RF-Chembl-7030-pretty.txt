@@ -1,0 +1,227 @@
+
+################################################################################
+################################# Load packages  #################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required libraries
+library(ranger)
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+#' 
+
+################################################################################
+######################### Create lists to store results ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Initialise result storage
+all_stats <- list()
+combined_mean_tpr <- list()
+combined_mean_fpr <- list()
+auc_info <- list()
+
+
+#' 
+#' # Run 70/30 RF model on cleaned chembl-fp
+## -----------------------------------------------------------------------------
+# Define fingerprint types
+fingerprint_types <- c("maccs", "extended", "pubchem")
+
+# Set seed and iteration parameters
+set.seed(42)
+n_iter <- 5
+
+# Loop over fingerprint types
+for (fp_type in fingerprint_types) {
+  cat(sprintf("Processing fingerprint type: %s\n", fp_type))
+  
+  # Load data
+  fIN <- sprintf("outputs/filtered_assayed_antibacterial_%s_fingerprints.csv", fp_type)
+  df <- read_csv(fIN, show_col_types = FALSE) %>% select(-Chembl_ID)
+  df$Actual_Activity <- as.factor(df$Actual_Activity)
+  fp_cols <- grep("^FP", colnames(df), value = TRUE)
+  
+  # Initialise storage
+  stats <- matrix(0, nrow = n_iter + 2, ncol = 5)
+  colnames(stats) <- c("ROC_AUC", "AUPR", "Sensitivity", "Specificity", "Accuracy")
+  rownames(stats) <- c(paste0("Run_", 1:n_iter), "Mean", "SD")
+  all_tpr <- list()
+  all_fpr <- list()
+  
+  # Iterative training and validation
+  for (i in 1:n_iter) {
+    cat(sprintf("Iteration %d\n", i))
+    set.seed(i)
+    train_idx <- sample(nrow(df), 0.7 * nrow(df), replace = FALSE)
+    TrainSet <- df[train_idx, ]
+    ValidSet <- df[-train_idx, ]
+    
+    RF <- ranger(Actual_Activity ~ ., 
+                 data = TrainSet[, c("Actual_Activity", fp_cols)],
+                 probability = TRUE)
+    
+    pred_probs <- predict(RF, ValidSet[, fp_cols])$predictions
+    pred_class <- ifelse(pred_probs[, 2] > 0.5, 1, 0)
+    
+    # Confusion matrix
+    cm <- table(Predicted = pred_class, Actual = as.numeric(ValidSet$Actual_Activity) - 1)
+    sensitivity <- cm[2,2] / sum(cm[,2])
+    specificity <- cm[1,1] / sum(cm[,1])
+    accuracy <- sum(diag(cm)) / sum(cm)
+    
+    # ROC + AUPR
+    R <- data.frame(Actual = as.numeric(ValidSet$Actual_Activity) - 1,
+                    Predicted = pred_probs[, 2]) %>% arrange(desc(Predicted))
+    PN <- sum(R$Actual == 1); N <- nrow(R)
+    TPR <- cumsum(R$Actual == 1) / PN
+    FPR <- cumsum(R$Actual == 0) / (N - PN)
+    ROC_AUC <- sum(diff(FPR) * TPR[-length(TPR)])
+    
+    precision <- cumsum(R$Actual == 1) / (1:N)
+    recall <- cumsum(R$Actual == 1) / PN
+    delta_recall <- diff(c(0, recall))
+    AUPR <- sum(precision * delta_recall)
+    
+    # Store results
+    stats[i, ] <- c(ROC_AUC, AUPR, sensitivity, specificity, accuracy)
+    all_tpr[[i]] <- TPR
+    all_fpr[[i]] <- FPR
+  }
+  
+  # Compute mean and SD
+  stats[n_iter + 1, ] <- colMeans(stats[1:n_iter, ])
+  stats[n_iter + 2, ] <- apply(stats[1:n_iter, ], 2, sd)
+  all_stats[[fp_type]] <- stats
+  
+  # Store average ROC
+  combined_mean_tpr[[fp_type]] <- Reduce("+", all_tpr) / n_iter
+  combined_mean_fpr[[fp_type]] <- Reduce("+", all_fpr) / n_iter
+  auc_info[[fp_type]] <- c(mean = stats[n_iter + 1, 1], sd = stats[n_iter + 2, 1])
+  
+  # Save to CSV
+  write.csv(stats, sprintf("outputs/Antibacterial_RF_stats_Filtered-CHEMBL-%s.csv", fp_type), row.names = TRUE)
+}
+
+
+
+################################################################################
+################################ Draw ROC curves #################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+png("outputs/Combined_ROC_Filtered_CHEMBL_RF.png", width = 8, height = 6, units = "in", res = 300)
+
+# Set margins and font sizes for a cleaner presentation.
+par(mar = c(5, 6, 2, 2) + 0.1, cex.lab = 1.8, cex.axis = 1.6)
+
+# Define the ordered fingerprint types and associated colours.
+ordered_types <- c("maccs", "pubchem", "extended")
+colours <- c("blue", "red", "green")
+
+# Create an empty ROC plot without a title.
+plot(NULL, xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "False Positive Rate (FPR)",
+     ylab = "True Positive Rate (TPR)",
+     main = "")
+
+# Draw the mean ROC curves for each fingerprint type with thick lines.
+for (i in seq_along(ordered_types)) {
+  fp_type <- ordered_types[i]
+  lines(combined_mean_fpr[[fp_type]], combined_mean_tpr[[fp_type]],
+        col = colours[i], lwd = 5)
+}
+
+# Add a legend with enlarged text and thick line samples.
+legend("bottomright", 
+       legend = sapply(ordered_types, function(fp) {
+         sprintf("%s: AUC = %.3f ± %.3f", fp, auc_info[[fp]]["mean"], auc_info[[fp]]["sd"])
+       }),
+       col = colours, lwd = 5, cex = 1.6, bty = "n", title = NULL)
+
+dev.off()
+
+
+#' 
+
+################################################################################
+############################ Save performance metrics ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Save Combined Evaluation Metrics
+combined_stats <- do.call(rbind, lapply(names(all_stats), function(fp) {
+  data.frame(
+    Fingerprint = fp, 
+    Metric = rownames(all_stats[[fp]]), 
+    all_stats[[fp]]
+  )
+}))
+
+# Save Combined Summary Results
+write_csv(combined_stats, "outputs/RF-Filtered-CHEMBL-Combined-Evaluation.csv")
+
+# Print Final Results
+print(combined_stats)
+
+print("RF model training and validation completed successfully for all fingerprint types.")
+
+#' 
+
+################################################################################
+############################ Run statistical analysis ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Stats test: Friedman + Nemenyi
+
+# Load the PMCMRplus library for the Nemenyi post-hoc test
+library(PMCMRplus)
+
+# Read the combined results CSV
+combined_stats <- read_csv("outputs/RF-Filtered-CHEMBL-Combined-Evaluation.csv", show_col_types = FALSE)
+
+# Filter to keep only the run-level data (i.e. rows where Metric is Run_1, Run_2, ..., Run_5)
+# Test on the ROC_AUC column
+run_data <- combined_stats %>%
+  # Keep rows whose 'Metric' starts with "Run_"
+  filter(grepl("^Run_", Metric)) %>%
+  # Select only the columns needed for the test: Fingerprint, Metric, and ROC_AUC
+  select(Fingerprint, Metric, ROC_AUC)
+
+# Pivot the data from long to wide format so each row is a single run
+# and each column corresponds to a particular fingerprint's ROC_AUC
+auc_wide <- run_data %>%
+  pivot_wider(names_from = Fingerprint, values_from = ROC_AUC)
+
+# Convert the relevant columns of 'auc_wide' into a matrix
+# Exclude the 'Metric' column (since that has "Run_1", etc.)
+auc_matrix <- auc_wide %>%
+  select(maccs, extended, pubchem) %>%   # re-order columns if needed
+  as.matrix()
+
+# Assign row names to the matrix so each row is e.g. "Run_1", "Run_2", ...
+rownames(auc_matrix) <- auc_wide$Metric
+
+# Run the Friedman test
+friedman_result <- friedman.test(auc_matrix)
+cat("\nFriedman test result:\n")
+print(friedman_result)
+
+# Post-hoc Nemenyi test
+nemenyi_result <- frdAllPairsNemenyiTest(auc_matrix)
+cat("\nNemenyi post-hoc result:\n")
+print(nemenyi_result)
+
+
+#' 
+## -----------------------------------------------------------------------------
+# Copy script to text file 
+library(knitr)
+purl("scripts/random_forests/R-Antibacterial-RF-S1B-filtered-Chembl.Rmd", output = "scripts_txt/random_forests/R-Antibacterial-RF-S1B-filtered-Chembl.R", documentation = 0)
+
+
+#' 
+#' 

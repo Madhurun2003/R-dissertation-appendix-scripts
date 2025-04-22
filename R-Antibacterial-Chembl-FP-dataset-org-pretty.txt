@@ -1,0 +1,258 @@
+
+################################################################################
+################################# Load Packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Setup: environment & libraries
+Sys.setenv(JAVA_HOME = "C:/Users/madhu/OneDrive/Desktop/Madhurun/Downloads/jdk-21.0.5+11")
+
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(readr)
+remove.packages("rcdk")
+install.packages("rcdk")
+library(rcdk)
+library(rJava)
+library(fingerprint)
+library(ggplot2)
+library(ranger)
+
+#' 
+
+################################################################################
+################################ Obtain assay IDs ################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Function to retrieve assay organism metadata
+get_assay_metadata <- function(assay_chembl_id) {
+  base_url <- "https://www.ebi.ac.uk/chembl/api/data/assay/"
+  query_url <- paste0(base_url, assay_chembl_id, ".json")
+  response <- GET(query_url)
+  
+  if (status_code(response) == 200) {
+    data_txt  <- content(response, as = "text", encoding = "UTF-8")
+    json_data <- fromJSON(data_txt)
+    org <- json_data$assay_organism
+    if (is.null(org)) org <- NA_character_
+    return(data.frame(assay_chembl_id = assay_chembl_id, organism = org,
+                      stringsAsFactors = FALSE))
+  } else {
+    return(data.frame(assay_chembl_id = assay_chembl_id, organism = NA_character_,
+                      stringsAsFactors = FALSE))
+  }
+}
+
+#' 
+
+################################################################################
+################## Obtain chembl compound data using assay IDs ###################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Function to retrieve compound data for an assay
+get_compound_data_for_assay <- function(assay_chembl_id) {
+  url <- paste0("https://www.ebi.ac.uk/chembl/api/data/activity.json?assay_chembl_id=",
+                assay_chembl_id, "&limit=10000")
+  response <- GET(url)
+  
+  if (status_code(response) == 200) {
+    data_txt  <- content(response, as = "text", encoding = "UTF-8")
+    json_data <- fromJSON(data_txt)
+    if (!is.null(json_data$activities)) {
+      compound_data <- data.frame(
+        assay_chembl_id = assay_chembl_id,
+        Chembl_ID       = json_data$activities$molecule_chembl_id,
+        SMILES          = json_data$activities$canonical_smiles,
+        Standard_Value  = as.numeric(json_data$activities$standard_value),
+        Standard_Units  = json_data$activities$standard_units,
+        Activity_Type   = json_data$activities$standard_type,
+        pChEMBL         = as.numeric(json_data$activities$pchembl_value),
+        stringsAsFactors = FALSE
+      )
+      return(compound_data)
+    }
+  }
+  return(NULL)
+}
+
+# Read assay IDs from local CSV file
+assays <- read.table("downloads/DOWNLOAD-XcUuIvyCgSMeSFgu-noX94dj9CbElCrkpHE7UNy-JBg=.csv", sep = ";")
+assay_chembl_ids <- assays[2:nrow(assays), 1]
+
+# Fetch compound data for each assay
+all_assayed_compounds <- lapply(assay_chembl_ids, get_compound_data_for_assay)
+assayed_compounds <- bind_rows(all_assayed_compounds) %>%
+  filter(!is.na(Standard_Value))
+
+# Fetch assay metadata (organism) for each assay
+all_assay_metas <- lapply(assay_chembl_ids, get_assay_metadata)
+assay_meta_df <- bind_rows(all_assay_metas)
+
+# Merge organism information into compound data
+assayed_compounds <- left_join(assayed_compounds, assay_meta_df, by = "assay_chembl_id")
+
+# Save raw merged data to CSV
+write.csv(assayed_compounds, "outputs/CHEMBLcompounds-antibacterials_raw_with_org.csv", row.names = FALSE)
+
+#' 
+
+################################################################################
+################# Clean chembl dataset units and activity types ##################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Data cleaning: filter by Activity_Type and Standard_Units, order by Standard_Value
+assayed_compounds <- read.csv("datasets/Antibacterial/CHEMBLcompounds-antibacterials_raw_with_org.csv") %>%
+  filter(Activity_Type == "MIC", Standard_Units == "ug.mL-1") %>%
+  arrange(Standard_Value)
+
+# Remove duplicate compounds and rows with missing SMILES
+assayed_compounds <- assayed_compounds[!duplicated(assayed_compounds$Chembl_ID), ]
+assayed_compounds <- assayed_compounds[!is.na(assayed_compounds$SMILES), ]
+
+# Summarise organism distribution
+organism_counts <- assayed_compounds %>%
+  group_by(organism) %>%
+  summarise(n_compounds = n_distinct(Chembl_ID)) %>%
+  arrange(desc(n_compounds))
+print(organism_counts)
+
+# Compute molecular weight and convert MIC values to µM
+assayed_compounds$Molecular_Weight <- NA_real_
+for (i in seq_len(nrow(assayed_compounds))) {
+  mol <- parse.smiles(assayed_compounds$SMILES[i])[[1]]
+  if (!is.null(mol)) {
+    assayed_compounds$Molecular_Weight[i] <- get.mol2formula(mol)@mass
+  }
+}
+
+# Filter out large molecules (MW > 900)
+max_mw_threshold <- 900
+assayed_compounds <- assayed_compounds %>%
+  filter(Molecular_Weight <= max_mw_threshold)
+
+# Convert MIC values from µg/mL to µM
+assayed_compounds <- assayed_compounds %>%
+  mutate(Standard_Value_uM = (1000 * Standard_Value) / Molecular_Weight)
+
+#' 
+
+################################################################################
+### Filter chembl dataset for staph and e.coli and set thresholds for activity ###
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Filter compounds to those with organisms of interest and classify activity
+df_filtered <- assayed_compounds %>%
+  filter(organism %in% c("Staphylococcus aureus", "Escherichia coli"))
+
+common_threshold_staph <- 5
+common_threshold_ecoli <- 5
+
+df_final <- df_filtered %>%
+  mutate(Actual_Activity = case_when(
+    organism == "Staphylococcus aureus" & Standard_Value_uM <= common_threshold_staph ~ "Active",
+    organism == "Escherichia coli"       & Standard_Value_uM <= common_threshold_ecoli ~ "Active",
+    TRUE ~ "Inactive"
+  ))
+
+# Save cleaned dataset
+write.csv(df_final, "outputs/cleaned_CHEMBLcompounds-antibacterials_filtered_ugmL_NEW.csv", row.names = FALSE)
+
+#' 
+
+################################################################################
+############## Generate fingerprints for the chembl cleaned dataset ##############
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Generate fingerprints for the cleaned dataset
+assayed_data <- read.csv("outputs/cleaned_CHEMBLcompounds-antibacterials_filtered_ugmL_NEW.csv") %>%
+  select(Chembl_ID, SMILES, Actual_Activity) %>%
+  filter(!is.na(SMILES), SMILES != "")
+
+fingerprint_types <- c("pubchem", "maccs", "extended")
+
+for (fp_type in fingerprint_types) {
+  output_file <- file(sprintf("outputs/assayed_antibacterial_%s_fingerprints.csv", fp_type), "w")
+  
+  test_mol <- parse.smiles(assayed_data$SMILES[1])
+  if (!is.null(test_mol[[1]])) {
+    test_FP <- as.character(get.fingerprint(test_mol[[1]], type = fp_type, fp.mode = 'bit', verbose = FALSE))
+    test_FP <- strsplit(test_FP, split = "")
+    test_FP <- as.data.frame(test_FP)
+    test_FP <- t(test_FP)
+    
+    cat("Chembl_ID,Actual_Activity,", file = output_file)
+    for (i in 1:(ncol(test_FP) - 1)) {
+      cat(sprintf("FP%d,", i), file = output_file)
+    }
+    cat(sprintf("FP%d\n", ncol(test_FP)), file = output_file)
+  }
+  
+  for (i in seq_len(nrow(assayed_data))) {
+    mol <- parse.smiles(assayed_data$SMILES[i])
+    if (!is.null(mol[[1]])) {
+      FP <- as.character(get.fingerprint(mol[[1]], type = fp_type, fp.mode = 'bit', verbose = FALSE))
+      FP <- strsplit(FP, split = "")
+      FP <- as.data.frame(FP)
+      FP <- t(FP)
+      
+      chembl_id <- assayed_data$Chembl_ID[i]
+      activity  <- assayed_data$Actual_Activity[i]
+      
+      cat(sprintf("%s,%s,%s\n", chembl_id, activity, paste(FP[, 1:ncol(FP)], collapse = ",")), file = output_file)
+    }
+  }
+  close(output_file)
+}
+
+#' 
+
+################################################################################
+######### Filter cleaned chembl-fp dataset for overlapping s1b compounds #########
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Filter out overlapping compounds with S1B based on fingerprints
+for (fp_type in fingerprint_types) {
+  chembl_fp <- read_csv(sprintf("outputs/assayed_antibacterial_%s_fingerprints.csv", fp_type), show_col_types = FALSE)
+  s1b_fp <- read_csv(sprintf("datasets/Antibacterial/S1B/S1B-FP-%s.csv", fp_type), show_col_types = FALSE)
+  fp_columns <- grep("^FP", colnames(chembl_fp), value = TRUE)
+  filtered_chembl_fp <- anti_join(chembl_fp, s1b_fp, by = fp_columns)
+  write_csv(filtered_chembl_fp, sprintf("outputs/filtered_assayed_antibacterial_%s_fingerprints.csv", fp_type))
+}
+
+#' 
+
+################################################################################
+################# Look for activity splits in chembl-fp datasets #################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Read the filtered assayed antibacterial extended fingerprints file
+filtered_data <- read_csv("outputs/filtered_assayed_antibacterial_extended_fingerprints.csv", show_col_types = FALSE)
+
+# Create a frequency table for the Actual_Activity column
+activity_counts <- table(filtered_data$Actual_Activity)
+print(activity_counts)
+
+## -----------------------------------------------------------------------------
+# Read the filtered assayed antibacterial pubchem fingerprints file
+filtered_data <- read_csv("outputs/filtered_assayed_antibacterial_pubchem_fingerprints.csv", show_col_types = FALSE)
+
+# Create a frequency table for the Actual_Activity column
+activity_counts <- table(filtered_data$Actual_Activity)
+print(activity_counts)
+
+## -----------------------------------------------------------------------------
+# Read the filtered assayed antibacterial maccs fingerprints file
+filtered_data <- read_csv("outputs/filtered_assayed_antibacterial_maccs_fingerprints.csv", show_col_types = FALSE)
+
+# Create a frequency table for the Actual_Activity column
+activity_counts <- table(filtered_data$Actual_Activity)
+print(activity_counts)
+

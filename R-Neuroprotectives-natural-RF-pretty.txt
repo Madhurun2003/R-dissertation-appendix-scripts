@@ -1,0 +1,135 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required libraries
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(ranger)
+Sys.setenv(JAVA_HOME = "C:/Users/madhu/OneDrive/Desktop/Madhurun/Downloads/jdk-21.0.5+11")
+library(rcdk)
+library(fingerprint)
+
+#' 
+
+################################################################################
+############ Run neuroprotective RF model on natural product dataset  ############
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types
+fingerprint_types <- c("pubchem", "maccs", "extended")
+
+# Loop through each fingerprint type to run the neuroprotective ChemBL-trained RF model on the cleaned natural product dataset
+for (fp_type in fingerprint_types) {
+  
+  cat(sprintf("\nProcessing fingerprint type: %s\n", fp_type))
+  
+  # Load the trained ChemBL RF model
+  RF_model <- readRDS(sprintf("models/neuroprotective-RF-Model-%s.rds", fp_type))
+  
+  # Load the cleaned natural product fingerprint dataset
+  # Use sprintf() inside read_csv to construct the correct file name
+  np_fp <- read_csv(sprintf("datasets/Neuroprotectives/natural_np_%s_fingerprints.csv", fp_type),show_col_types = FALSE)
+  
+  fp_columns <- grep("^FP", colnames(np_fp), value = TRUE)
+  
+  # Predict class probabilities using the ChemBL-trained RF model
+  pred_probs <- predict(RF_model, data = np_fp[, fp_columns])$predictions
+  np_fp$Predicted_Probability <- pred_probs[, 2]
+
+   # Order the data frame by predicted probability (descending order)
+  np_fp <- np_fp %>% arrange(desc(Predicted_Probability))
+  
+  # Save predictions to a CSV file
+  write_csv(
+    np_fp, 
+    sprintf("outputs/np_RF_CHEMBL_Predictions-%s.csv", fp_type)
+  )
+  cat(sprintf("Predictions saved: outputs/np_RF_CHEMBL_Predictions-%s.csv\n", fp_type))
+}
+
+
+#' 
+
+################################################################################
+################### Run BBBp model on natural product dataset ####################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types 
+fingerprint_types <- c("pubchem", "maccs", "extended")
+
+# Loop through each fingerprint type to update neuroprotectives predictions with BBB scores
+for (fp_type in fingerprint_types) {
+  
+  cat(sprintf("\nUpdating BBB predictions for fingerprint type: %s\n", fp_type))
+  
+  # Load the previously generated neuroprotectives predictions file
+  np_file <- sprintf("outputs/np_RF_CHEMBL_Predictions-%s.csv", fp_type)
+  np_rf <- read_csv(np_file, show_col_types = FALSE)
+  
+  # Load the BBB model for this fingerprint type (trained on 100% of BBB data)
+  bbb_model <- readRDS(sprintf("models/BBB-RF-Model-%s-100.rds", fp_type))
+  
+  # Identify the fingerprint predictor columns (those starting with "FP")
+  fp_columns <- grep("^FP", colnames(np_rf), value = TRUE)
+  
+  # Predict BBB penetration probabilities using the BBB RF model
+  bbb_pred <- predict(bbb_model, data = np_rf[, fp_columns])$predictions
+  
+  # The second column contains the probability for the positive (BBB penetration) class
+  np_rf$BBB_Predicted_Probability <- bbb_pred[, 2]
+  
+  # Save the updated predictions to a CSV file
+  output_filename <- sprintf("outputs/np_RF_CHEMBL_Predictions_with_BBB-%s.csv", fp_type)
+  
+  write_csv(np_rf, output_filename)
+ 
+   cat(sprintf("Updated predictions saved: %s\n", output_filename))
+}
+
+
+#' 
+
+################################################################################
+################## Run ClinTox model on natural product dataset ##################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types (should match those used previously)
+fingerprint_types <- c("pubchem", "maccs", "extended")
+
+# Loop through each fingerprint type to update the combined predictions with ClinTox scores
+for (fp_type in fingerprint_types) {
+  cat(sprintf("\nUpdating ClinTox predictions for fingerprint type: %s\n", fp_type))
+  
+  # Load the combined neuroprotective + BBB predictions file
+  combined_file <- sprintf("outputs/Neuroprotectives/Neuroprotectives-RF-100/np_RF_CHEMBL_Predictions_with_BBB-%s.csv", fp_type)
+  combined_data <- read_csv(combined_file, show_col_types = FALSE)
+  
+  # Load the ClinTox model for this fingerprint type (trained on 100% ClinTox data)
+  clintox_model <- readRDS(sprintf("models/ClinTox-RF-Model-%s-100.rds", fp_type))
+  
+  # Identify the fingerprint predictor columns (those starting with "FP")
+  fp_columns <- grep("^FP", colnames(combined_data), value = TRUE)
+  
+  # Predict ClinTox probabilities using the ClinTox RF model
+  clintox_pred <- predict(clintox_model, data = combined_data[, fp_columns])$predictions
+  
+  # Add a new column with these predictions
+  combined_data$ClinTox_Predicted_Probability <- clintox_pred[, 2]
+  
+  # Save the updated file with both BBB and ClinTox predictions
+  output_file <- sprintf("outputs/np_RF_CHEMBL_Predictions_with_BBB_and_ClinTox-%s.csv", fp_type)
+  write_csv(combined_data, output_file)
+  
+  cat(sprintf("Updated combined predictions saved: %s\n", output_file))
+}
+
+

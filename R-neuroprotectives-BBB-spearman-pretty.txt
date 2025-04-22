@@ -1,0 +1,50 @@
+
+################################################################################
+## Mann Whitney Test with top 50 and bottom 50 scoring BBB penetrant compounds and their respective neuroprotective score ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load necessary libraries
+library(dplyr)
+library(readr)
+
+# Define fingerprint types 
+fingerprint_types <- c("pubchem", "maccs", "extended")
+
+# Loop through each fingerprint type
+for (fp_type in fingerprint_types) {
+  
+  cat(sprintf("\n===== Fingerprint: %s =====\n", fp_type))
+  
+  # File to be used
+  file_name <- sprintf("outputs/np_RF_CHEMBL_Predictions_with_BBB_and_ClinTox-%s.csv", fp_type)
+  
+  # Load the data file
+  data <- read_csv(file_name, show_col_types = FALSE)
+  
+  # Rank the dataset by BBB_Predicted_Probability (descending)
+  data_ranked <- data %>%
+    arrange(desc(BBB_Predicted_Probability))
+  
+  # Extract the top 50 and bottom 50 BBB scoring compounds
+  top_50 <- data_ranked[1:50, ]
+  bottom_50 <- data_ranked[(nrow(data_ranked) - 49):nrow(data_ranked), ]
+  
+  # Mann-Whitney (Wilcoxon) test to compare neuroprotective scores
+  # between top 50 vs. bottom 50 based on BBB predictions
+  mw_test <- wilcox.test(
+    top_50$Predicted_Probability,
+    bottom_50$Predicted_Probability,
+    alternative = "two.sided"
+  )
+  
+  cat("\n--- Mann-Whitney Test (Neuroprotective Probability) based on BBB scores ---\n")
+  print(mw_test)
+  
+  # Check group medians
+  cat("\nTop 50 (BBB) group - Median Neuroprotective Probability:", median(top_50$Predicted_Probability), "\n")
+  cat("Bottom 50 (BBB) group - Median Neuroprotective Probability:", median(bottom_50$Predicted_Probability), "\n")
+}
+
+
+#' 

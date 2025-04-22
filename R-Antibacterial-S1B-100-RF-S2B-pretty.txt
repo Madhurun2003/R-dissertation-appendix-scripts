@@ -1,0 +1,227 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Set up environment and import required libraries
+Sys.setenv(JAVA_HOME = "C:/Users/madhu/OneDrive/Desktop/Madhurun/Downloads/jdk-21.0.5+11")
+
+# Load required packages
+# 'ranger' required for Random Forest implementation
+# 'readr', 'dplyr', and 'tidyr' used for data manipulation
+# 'stats' used for statistical tests (Spearman's rank correlation, Fisher's exact test)
+library(ranger)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(stats)
+
+#' 
+
+################################################################################
+######################### Create lists to store results ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Initialise lists to store results for each fingerprint type
+# - prediction_summary_list: Stores performance metrics
+# - spearman_results_list: Stores Spearman correlation results
+# - fisher_results_list: Stores Fisher test results
+prediction_summary_list <- list()
+spearman_results_list <- list()
+fisher_results_list <- list()
+
+#' 
+
+################################################################################
+######################### Load and clean Stokes' dataset #########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load Stokes' dataset and remove unnecessary columns
+s2b_full <- read_csv("datasets/Antibacterial/S2B/S2B_dataset_csv.csv", skip = 1, show_col_types = FALSE) %>%
+    rename(ClinTox = `ClinTox (low = less predicted toxicity)`) %>%
+    select(-ClinTox, -`...7`)  # Remove unnecessary columns
+
+# Ensure Pred_Score is numeric
+s2b_full <- s2b_full %>%
+    mutate(Pred_Score = as.numeric(Pred_Score))
+
+# Assign Rank_Stokes based on Pred_Score ordering
+s2b_full <- s2b_full %>%
+    arrange(desc(Pred_Score)) %>%
+    mutate(Rank_Stokes = row_number())  # Assign rank based on sorted order
+
+#' 
+
+################################################################################
+### Fully train RF model on S1B and rank S2B dataset for each fingerprint type ###
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types for loop execution
+fingerprint_types <- c("maccs", "extended", "pubchem")
+
+# Loop through each fingerprint type
+for (fp_type in fingerprint_types) {
+  cat(sprintf("\nProcessing fingerprint type: %s\n", fp_type))
+
+  # Load & prepare S1B dataset for model training
+  s1b_fp <- read_csv(sprintf("datasets/Antibacterial/S1B/S1B-FP-%s.csv", fp_type), show_col_types = FALSE)
+  s1b_fp$Activity <- as.factor(s1b_fp$Activity)  # Convert Activity to a categorical variable
+  fp_columns <- grep("^FP", colnames(s1b_fp), value = TRUE)  # Identify fingerprint columns
+
+  # Train RF on S1B dataset
+  RF <- ranger(Activity ~ ., 
+               data = s1b_fp[, c("Activity", fp_columns)],
+               importance = "impurity", 
+               probability = TRUE, 
+               num.trees = 500)
+  
+  saveRDS(RF, sprintf("models/S1B-RF-Model-%s.rds", fp_type))
+
+  # Load S2B-FP dataset and predict probabilities
+  s2b_fp <- read_csv(sprintf("datasets/Antibacterial/S2B/S2B-FP-%s.csv", fp_type), show_col_types = FALSE)
+  predictions <- predict(RF, data = s2b_fp[, fp_columns])$predictions
+  s2b_fp$Predicted_Probability <- predictions[, 2]
+
+  # Rank based on RF Predicted Probability
+  s2b_ranked <- s2b_fp %>%
+    arrange(desc(Predicted_Probability)) %>%
+    mutate(Rank_RF = row_number())
+
+  # Merge Rank_Stokes from Stokes dataset
+  # Remember s2b_full is Stokes ranked
+  # left_join adds stokes'ranking to the s2b_ranked dataset 
+  s2b_ranked <- s2b_ranked %>%
+    left_join(s2b_full %>% select(Broad_ID, Name, Pred_Score, Mean_Inhibition, Rank_Stokes), by = "Broad_ID")
+
+  # Save ranked S2B dataset
+  write_csv(s2b_ranked, sprintf("outputs/Antibacterial-S2B-FP-ranked-%s.csv", fp_type))
+}
+
+#' 
+
+################################################################################
+####################### Run Spearman rank correlation test #######################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Compute Spearman correlation between RF ranking and Stokes ranking
+for (fp_type in fingerprint_types) {
+  s2b_ranked <- read_csv(sprintf("outputs/Antibacterial-S2B-FP-ranked-%s.csv", fp_type), show_col_types = FALSE)
+  
+  # Compute Spearman correlation coefficient and p-value
+  spearman_test <- cor.test(s2b_ranked$Rank_RF, s2b_ranked$Rank_Stokes, method = "spearman")
+  
+  # Store results with fingerprint type, correlation coefficient and statistical significance
+  spearman_results_list[[fp_type]] <- data.frame(Fingerprint_Type = fp_type,
+                                                 Spearman_Correlation = spearman_test$estimate,# Spearman correlation coeefficient
+                                                 p_value = spearman_test$p.value) # p-value for statistical significance
+}
+
+# Combine and save Spearman correlation results
+spearman_results <- do.call(rbind, spearman_results_list)
+write_csv(spearman_results, "outputs/Spearman_Correlation_Results.csv")
+
+spearman_results
+
+#' 
+#' 
+
+################################################################################
+## Run Fisher's exact test with contingency tables on the top 99 Stokes' assayed compounds ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Extract the top 99 Broad_IDs from Stokes' dataset based on Pred_Score
+# - s2b_full is the Stokes' data
+top_99_broad_ids <- s2b_full %>%
+  arrange(Rank_Stokes) %>%  # Lower Rank_Stokes means higher in Stokes' ranking
+  head(99) %>%
+  pull(Broad_ID)
+
+# Define a function to perform Fisher's exact test with labelled contingency tables
+perform_fisher_test <- function(actual, predicted) {
+  # Create the base contingency table
+  contingency_table <- table(actual, predicted)
+  
+  # Force the row/column order to match:
+  # levels(actual) <- c("Active", "Inactive")
+  # levels(predicted) <- c("Active", "Inactive")
+
+  # Rename row and column labels
+  rownames(contingency_table) <- c("Active", "Inactive")
+  colnames(contingency_table) <- c("Active", "Inactive")
+  
+  # Perform Fisher's test
+  fisher_test <- fisher.test(contingency_table)
+  
+  # Return both the labeled table and test results
+  list(
+    contingency_table = contingency_table,
+    result = data.frame(
+      p_value = fisher_test$p.value,
+      odds_ratio = fisher_test$estimate
+    )
+  )
+}
+
+
+# Initialise a list to store Fisher's test results
+fisher_results_list <- list()
+
+# Loop through each fingerprint type
+for (fp_type in fingerprint_types) {
+  cat(sprintf("\nProcessing Fisher's test for fingerprint type: %s\n", fp_type))
+  
+  # Load ranked S2B dataset and filter to top 99 compounds (based on Stokes' ranking)
+  s2b_ranked <- read_csv(sprintf("outputs/Antibacterial-S2B-FP-ranked-%s.csv", fp_type), show_col_types = FALSE) %>%
+    filter(Broad_ID %in% top_99_broad_ids)
+  
+  # Define Actual_Activity using Mean_Inhibition (Active if ≤0.2)
+  s2b_ranked <- s2b_ranked %>%
+    mutate(Actual_Activity = ifelse(Mean_Inhibition <= 0.2, "Active", "Inactive"))
+  
+  # Define RF predictions (Active if Predicted_Probability > 0.5)
+  s2b_ranked <- s2b_ranked %>%
+    mutate(RF_Prediction = ifelse(Predicted_Probability > 0.5, "Active", "Inactive"))
+  
+  # Define Stokes' NN predictions (Active if Pred_Score > 0.5)
+  s2b_ranked <- s2b_ranked %>%
+    mutate(Stokes_NN_Prediction = ifelse(Pred_Score > 0.5, "Active", "Inactive"))
+  
+  # Generate labeled contingency table and perform Fisher's test for RF vs Actual
+  fisher_rf <- perform_fisher_test(s2b_ranked$Actual_Activity, s2b_ranked$RF_Prediction)
+  # Generate labeled contingency table and perform Fisher's test for Stokes NN vs Actual
+  fisher_nn <- perform_fisher_test(s2b_ranked$Actual_Activity, s2b_ranked$Stokes_NN_Prediction)
+  
+  # Print labeled contingency tables for verification
+  cat("\nLabeled Contingency Table for RF (", fp_type, "):\n", sep = "")
+  print(fisher_rf$contingency_table)
+  cat("\nLabeled Contingency Table for NN (", fp_type, "):\n", sep = "")
+  print(fisher_nn$contingency_table)
+  
+  # Store Fisher's test results for this fingerprint type
+  fisher_results_list[[fp_type]] <- data.frame(
+    Fingerprint_Type = fp_type,
+    RF_p_value = fisher_rf$result$p_value,
+    RF_odds_ratio = fisher_rf$result$odds_ratio,
+    NN_p_value = fisher_nn$result$p_value,
+    NN_odds_ratio = fisher_nn$result$odds_ratio
+  )
+}
+
+# Combine and save Fisher's test results
+fisher_results <- do.call(rbind, fisher_results_list)
+write_csv(fisher_results, "outputs/Fisher_Test_Results_Top99.csv")
+cat("Fisher's exact tests for both RF and Stokes-NN predictions completed and saved.\n")
+
+
+#' 
+## -----------------------------------------------------------------------------
+library(knitr)
+purl("scripts/random_forests/R-Antibacterial-RF-S2B.Rmd", output = "scripts_txt/random_forests/R-Antibacterial-RF-S2B.R", documentation = 0)
+
+

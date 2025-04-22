@@ -1,0 +1,57 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required packages
+library(ranger)
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+#' 
+
+################################################################################
+############ Train Random Forest model on all of the ClinTox Dataset #############
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types to process
+FPtypes <- c("pubchem", "extended", "maccs")
+
+# Loop through each fingerprint type and train a model on 100% of the ClinTox data
+for (FPtype in FPtypes) {
+  
+  cat(sprintf("\nTraining ClinTox 100%% RF model for fingerprint type: %s\n", FPtype))
+  
+  # Construct the input file path based on fingerprint type
+  fIN <- sprintf("datasets/ClinTox/ClinTox-FP-%s.csv", FPtype)
+  
+  # Read the CSV file into a dataframe 'd'
+  d <- read.csv(fIN)
+  
+  # Remove rows with missing values to prevent errors
+  d <- na.omit(d)
+  
+  # Convert the target variable 'toxicity' to a factor
+  d$toxicity <- as.factor(d$toxicity)
+  
+  # Train the Random Forest model on the entire dataset (100% training)
+  RF_model <- ranger(
+    toxicity ~ ., 
+    data = d, 
+    probability = TRUE,       
+    importance = "impurity",  
+    seed = 42                   
+  )
+  
+  # Save the trained model as an RDS file
+  model_file <- sprintf("models/ClinTox-RF-Model-%s-100.rds", FPtype)
+  saveRDS(RF_model, model_file)
+  
+  cat(sprintf("ClinTox 100%% RF model for %s saved as %s\n", FPtype, model_file))
+}
+
+
+#' 

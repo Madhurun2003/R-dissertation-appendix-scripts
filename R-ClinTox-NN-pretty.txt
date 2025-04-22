@@ -1,0 +1,243 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+setwd("C:/Users/madhu/OneDrive/Desktop/Madhurun")
+
+# Load Required Packages
+# Install and load the 'neuralnet' package for neural network implementation
+# install.packages("neuralnet")  
+library(neuralnet)
+library(neuralnet)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(tidyr)
+
+
+#' 
+
+################################################################################
+######################### Create lists to store results ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define the fingerprint types to process
+FPtypes <- c("pubchem", "extended", "maccs")
+
+# Create empty lists to store evaluation results and ROC curve info
+all_stats <- list()              # Stores metrics (AUC, AUPR, etc.)
+combined_mean_tpr <- list()      # Stores averaged TPR values
+combined_mean_fpr <- list()      # Stores averaged FPR values
+auc_info <- list()               # Stores AUC mean and SD
+
+
+#' 
+
+################################################################################
+######################## Train 70/30 Neural Network model ########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Loop through each fingerprint type
+for (FPtype in FPtypes) {
+  cat(sprintf("Processing fingerprint type: %s\n", FPtype))
+  
+  # Load dataset
+  fIN <- sprintf("datasets/ClinTox/ClinTox-FP-%s.csv", FPtype)
+  d <- read.csv(fIN)
+  d <- na.omit(d)  # Remove any rows with missing values
+  d$toxicity <- as.factor(d$toxicity)  # Convert target to factor
+  
+  # Ensure all fingerprint columns are numeric
+  for (i in 2:ncol(d)) {
+    d[, i] <- as.numeric(d[, i])
+  }
+  
+  n_iter <- 5  # Number of iterations
+  stats <- matrix(0, nrow = n_iter + 2, ncol = 5)  
+  colnames(stats) <- c("ROC_AUC", "AUPR", "Sensitivity", "Specificity", "Accuracy")
+  rownames(stats) <- c(paste0("Run_", 1:n_iter), "Mean", "SD")
+  
+  all_tpr <- list()
+  all_fpr <- list()
+  
+  # Iterative training and evaluation
+  for (iteration in 1:n_iter) {
+    cat(sprintf("Iteration %d\n", iteration))
+    set.seed(123 + iteration)  # Reproducibility
+    
+    # Train-test split
+    train_idx <- sample(nrow(d), 0.7 * nrow(d), replace = FALSE)
+    TrainSet <- d[train_idx, ]
+    ValidSet <- d[-train_idx, ]
+    
+    # Train NN model
+    model <- neuralnet(
+      toxicity ~ .,
+      data = TrainSet,
+      hidden = c(2),
+      linear.output = FALSE,
+      stepmax = 1e7
+    )
+    
+    # Predict probabilities on validation set
+    predValid <- predict(model, ValidSet)
+    pred_class_valid <- ifelse(predValid[, 2] > 0.5, 1, 0)
+    
+    # Confusion matrix
+    confusion_matrix <- table(Predicted = pred_class_valid, Actual = as.numeric(ValidSet$toxicity) - 1)
+    
+    # Compute metrics
+    sensitivity <- confusion_matrix[2, 2] / sum(confusion_matrix[, 2])
+    specificity <- confusion_matrix[1, 1] / sum(confusion_matrix[, 1])
+    accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+
+    # ROC + AUPR calculation
+    R <- data.frame(Actual = as.numeric(ValidSet$toxicity) - 1, Predicted = predValid[, 2])
+    R <- R[order(-R$Predicted), ]
+    PN <- sum(R$Actual == 1)
+    N <- nrow(R)
+    
+    TPR <- cumsum(R$Actual == 1) / PN
+    FPR <- cumsum(R$Actual == 0) / (N - PN)
+    ROC_AUC <- sum(diff(FPR) * TPR[-length(TPR)])
+    
+    precision <- cumsum(R$Actual == 1) / (1:N)
+    recall <- cumsum(R$Actual == 1) / PN
+    delta_recall <- diff(c(0, recall))
+    AUPR <- sum(precision * delta_recall)
+    
+    stats[iteration, ] <- c(ROC_AUC, AUPR, sensitivity, specificity, accuracy)
+    all_tpr[[iteration]] <- TPR
+    all_fpr[[iteration]] <- FPR
+  }
+  
+  # Compute mean + SD across iterations
+  stats[n_iter + 1, ] <- colMeans(stats[1:n_iter, ])
+  stats[n_iter + 2, ] <- apply(stats[1:n_iter, ], 2, sd)
+  all_stats[[FPtype]] <- stats
+  
+  # Save per-FP metrics
+  write.csv(stats, file = sprintf("outputs/ClinTox_NN_stats_%s.csv", FPtype), row.names = TRUE)
+  
+  # Average ROC for superimposed plot
+  mean_tpr <- Reduce("+", all_tpr) / n_iter
+  mean_fpr <- Reduce("+", all_fpr) / n_iter
+  combined_mean_tpr[[FPtype]] <- mean_tpr
+  combined_mean_fpr[[FPtype]] <- mean_fpr
+  auc_info[[FPtype]] <- c(mean = stats[n_iter + 1, 1], sd = stats[n_iter + 2, 1])
+}
+
+
+
+################################################################################
+################################ Draw ROC curves #################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+png("outputs/Combined_ROC_Curves_ClinTox_NN.png", width = 8, height = 6, units = "in", res = 300)
+
+# Set margins and enlarge axis labels and tick mark fonts for clarity.
+par(mar = c(5, 6, 2, 2) + 0.1, cex.lab = 1.8, cex.axis = 1.6)
+
+colours <- c("blue", "red", "green")
+
+# Create an empty plot frame without a main title.
+plot(NULL, xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "False Positive Rate (FPR)",
+     ylab = "True Positive Rate (TPR)",
+     main = "")
+
+# Draw ROC curves for each fingerprint type with thick lines (lwd = 5)
+for (i in seq_along(FPtypes)) {
+  lines(combined_mean_fpr[[FPtypes[i]]], combined_mean_tpr[[FPtypes[i]]],
+        col = colours[i], lwd = 5)
+}
+
+# Display the legend with enlarged text (cex = 1.6) and matching line samples
+legend("bottomright",
+       legend = sapply(FPtypes, function(fp) sprintf("%s: %.3f ± %.3f", fp, auc_info[[fp]]["mean"], auc_info[[fp]]["sd"])),
+       col = colours, lwd = 5, cex = 1.6, bty = "n", title = NULL)
+
+dev.off()
+
+
+
+################################################################################
+########################## Save NN performance metrics ###########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Combine evaluation metrics from all fingerprints into one table
+
+combined_nn_stats <- do.call(rbind, lapply(names(all_stats), function(fp) {
+  data.frame(
+    Fingerprint = fp,
+    Metric = rownames(all_stats[[fp]]),
+    all_stats[[fp]]
+  )
+}))
+
+# Save combined results
+write_csv(combined_nn_stats, "outputs/ClinTox_NN_Combined_Evaluation.csv")
+
+# Print for visual inspection
+print(combined_nn_stats)
+print("Neural network evaluation completed for all fingerprint types.")
+
+
+#' 
+
+################################################################################
+############################ Run statistical analysis ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load necessary library
+library(PMCMRplus)
+
+# Read the combined stats 
+combined_stats <- read_csv("outputs/ClinTox_NN_Combined_Evaluation.csv", show_col_types = FALSE)
+
+# Filter only the run-level data (i.e., Run_1, Run_2, etc.)
+run_data <- combined_stats %>%
+  filter(grepl("^Run_", Metric)) %>%
+  select(Fingerprint, Metric, ROC_AUC)
+
+# Pivot the data to wide format: each column is a fingerprint type, rows are runs
+auc_matrix <- run_data %>%
+  pivot_wider(names_from = Fingerprint, values_from = ROC_AUC) %>%
+  select(maccs, extended, pubchem)  # ensure correct column order
+
+# Convert to matrix
+auc_matrix <- as.matrix(auc_matrix)
+rownames(auc_matrix) <- paste0("Run_", seq_len(nrow(auc_matrix)))
+
+# Run Friedman test
+friedman_result <- friedman.test(auc_matrix)
+print("Friedman test result:")
+print(friedman_result)
+
+# Run post-hoc Nemenyi test
+nemenyi_result <- frdAllPairsNemenyiTest(auc_matrix)
+print("Nemenyi post-hoc result:")
+print(nemenyi_result)
+
+
+#' 
+## -----------------------------------------------------------------------------
+library(knitr)
+purl("scripts/neural_networks/R-ClinTox-NN.Rmd",
+     output = "scripts_txt/neural_networks/R-ClinTox-NN.R",
+     documentation = 0)
+
+
+#' 
+#' 
+#' 
+#' 
+#' 
+#' 

@@ -1,0 +1,214 @@
+
+################################################################################
+########################### Install and load packages ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Install packages
+# install.packages("rcdk")
+# install.packages("fingerprint")
+Sys.setenv(JAVA_HOME = "C:/Users/madhu/OneDrive/Desktop/Madhurun/Downloads/jdk-21.0.5+11")
+# install.packages("rJava", type = "source")   
+
+# Load packages
+library(rJava)
+library("rcdk")
+library("fingerprint")
+
+#' 
+
+################################################################################
+#################################### Example #####################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Examplar SMILES string
+smi="CC(C)C1=C(C(=C(N1CC[C@H](C[C@H](CC(=O)O)O)O)C2=CC=C(C=C2)F)C3=CC=CC=C3)C(=O)NC4=CC=CC=C4"
+
+# The parse.smiles() function converts the SMILES string into a molecular object 
+# This can be used to generate fingerprints
+mol=parse.smiles(smi)
+
+# Generate an extended 166 dimensional fingerprint
+fp=get.fingerprint(mol[[1]], type = 'extended',fp.mode = 'bit', verbose=FALSE)
+
+# Convert the fingerprint to a string to carry out analysis with 
+str(fp)
+as.character(fp)
+
+
+################################################################################
+########### Learn relationship between fingerprint and BBB penetration ###########
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Read the BBB dataset and set the fingerprint type for future analyses
+# The read.csv() function loads the BBBp dataset from a CSV file into a data frame (COMP), containing compound data such as SMILES and labels
+COMP <- read.csv("datasets/BBBp/BBBp.csv")
+
+# Calculate the number of rows in the COMP data frame (containing the BBBp.csv data)
+# This represents the number of compounds in the dataset
+moln=nrow(COMP)
+
+# 'extended' often preferred for predictive modeling, especially machine learning, compared to maccs or PubChem
+FPtype="extended"
+
+getwd()
+
+#' 
+
+################################################################################
+## Test run to verify that SMILES string can be parsed and fingerprints can be generated ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Ensure the fingerprint generation code works for one molecule before proceeding
+
+# Test molecule index
+i=10 
+
+# Parse SMILES string for the test molecule
+test_mol=parse.smiles(COMP[i,4])
+
+FP=as.character(get.fingerprint(test_mol[[1]], type = FPtype,fp.mode = 'bit', verbose=FALSE))
+
+# Convert fingerprint to individual bits
+FP=strsplit(FP,split="")
+
+# 'as.data.frame(FP)' converts the list of bits into a data frame
+FP=as.data.frame(FP)
+
+# 't(FP)' transposes the data frame so that each column in the same row corresponds to a fingerprint bit
+FP=t(FP)
+
+# Check dimensions of generated fingerprint
+FPn = length(FP)
+
+#' 
+
+################################################################################
+######################## Open the output file for writing ########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# The sprintf() function creates an output file path for storing the generated fingerprints, appending the chosen fingerprint type (FPtype) to the file name
+getwd()
+fOUT=sprintf("datasets/BBBp/BBBp-%s.csv",FPtype)
+
+#' 
+
+################################################################################
+#################### Write the header row to the output file #####################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Open the output file for writing using 'w', where the generated fingerprints will be stored 
+
+output_file = file(fOUT, "w")
+
+# Write the first part of the header, incorporating the compound name and the binary BBB penetration label
+cat(sprintf("CMP,p_np,"), file = output_file)
+
+# Write the fingerprint column headers
+# Iterate through all the fingerprint elements except the last one
+# Write each fingerprint column name (FP1,FP2,... FPn-1)to the file, separated by commas
+# - '%d' is replaced with the current value of i
+# - "," adds a comma between each column name in the header row
+for (i in 1:(FPn - 1)) {
+  cat(sprintf("FP%d,", i), file = output_file)
+}
+
+# Write the last fingerprint column name in the 'fp' output file
+# - "\n" ends the header line with a newline character to ensure header row is formatted and completed correctly
+cat(sprintf("FP%d\n", FPn), file = output_file)
+
+#' 
+
+################################################################################
+###################### Main loop for fingerprint generation ######################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Loop through all rows in the dataset
+# Extract the SMILES string from column 4 of the 'COMP' dataset for that current row, to process each compound and generate it's molecular fingerprint
+for (i in 1:moln) {
+  mol = parse.smiles(COMP[i, 4])
+  
+# Check if SMILES strings have been parsed successfully into a molecular object
+# If so, then '{}' is carried out
+# - 'get.fingerprint()' generates the fingerprint for the molecular object ('mol[[1]]') using the specific fingerprint type
+# - 'as.character()' converts fingerprint to a string of 0s and 1s
+# - 'strsplit()' splits the binary string into individual characters (bits) for manipulations
+# - 'as.data.frame(FP)' converts the list of bits into a data frame
+# - 't(FP)' transposes the data frame so that each column in the same row corresponds to a fingerprint bit
+  if (!is.null(mol[[1]])) {
+    FP = as.character(get.fingerprint(mol[[1]], type = FPtype, fp.mode = 'bit', verbose = FALSE))
+    FP = strsplit(FP, split = "")
+    FP = as.data.frame(FP)
+    FP = t(FP)
+
+# Write data to the output file  for the current compound
+# - 'COMP[i,2]' is the compound identifier
+# - 'COMP[i,3]' is the BBB penetration label
+# - 'paste(FP[, 1:ncol(FP)], collapse = ","' where FP is a transposed data frame and extracts all the bits of the fingerprint for the current molecule 
+# 'collapse = ","' creates the fingerprint bits as a comma separated string
+    cat(sprintf("%s,%s,%s\n", COMP[i, 2], COMP[i, 3], paste(FP[, 1:ncol(FP)], collapse = ",")), file = output_file)
+    
+# Prints a message to the console after processing each compound
+# 'flush.console()' ensures the message is displayed real-time
+    cat("Completed iteration:", i, "\n")
+    flush.console()
+  }
+}
+
+# IMPORTANT: Close the CSV file after all rows have been processed
+close(output_file)
+
+#' 
+#' 
+
+################################################################################
+############################### Check class split ################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Read the CSV file that you generated earlier
+output_data <- read.csv("datasets/BBBp/BBBP.csv", header = TRUE)
+
+# Display the first few rows to confirm the file loaded correctly
+head(output_data)
+
+# Count how many 1s and 0s there are in the p_np column
+counts <- table(output_data$p_np)
+print(counts)
+
+
+#' 
+#' 
+## -----------------------------------------------------------------------------
+getwd()
+library(knitr)
+purl("scripts/fingerprints/R-BBBP-FP-extended.Rmd", output = "scripts_txt/fingerprints/R-BBBP-FP-extended.R", documentation = 2, quiet = TRUE)
+
+# 1a) read in the purl’d .R
+infile  <- "scripts_txt/fingerprints/R-BBBP-FP-extended.R"
+lines   <- readLines(infile)
+
+# 1b) drop any roxygen "#' " prefixes
+lines   <- sub("^#' ?", "", lines)
+
+# 1c) collapse accidental "## # SECTION:" → "# SECTION:"
+lines   <- sub("^##? +# SECTION:", "# SECTION:", lines)
+
+# 1d) find first `# SECTION:` and keep everything after
+first   <- which(grepl("^# SECTION:", lines))[1]
+trimmed <- lines[first:length(lines)]
+
+# write out your cleaned, trimmed script
+clean  <- "scripts_txt/fingerprints/R-BBBP-FP-extended-clean-trimmed.R"
+writeLines(trimmed, clean)
+
+
+
+#' 
+#' 

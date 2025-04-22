@@ -1,0 +1,96 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Set JAVA_HOME if needed
+Sys.setenv(JAVA_HOME = "C:/Users/madhu/OneDrive/Desktop/Madhurun/Downloads/jdk-21.0.5+11")
+
+# Load Required Libraries 
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(readr)
+remove.packages("rcdk")
+install.packages("rcdk")
+library(rcdk)
+library(fingerprint)
+library(rJava)
+
+
+################################################################################
+###################### Load cleaned natural product dataset ######################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load the cleaned natural product dataset
+np_data <- read_csv(
+  "outputs/cleaned_natural_np_data.csv",
+  quote = '"',         # Handle quoted fields so names with commas are processed correctly
+  col_names = TRUE,
+  show_col_types = FALSE
+)
+
+
+#' 
+
+################################################################################
+####### Generate fingerprints for compounds in the natural product dataset #######
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define Fingerprint Types to generate (consistent with your previous work)
+fingerprint_types <- c("pubchem", "maccs", "extended")
+
+# Generate Fingerprints for each fingerprint type
+for (fp_type in fingerprint_types) {
+  
+  # Define output file for the current fingerprint type
+  output_file <- file(sprintf("outputs/natural_np_%s_fingerprints.csv", fp_type), "w")
+  
+  # Generate a test fingerprint to set column headers
+  test_mol <- parse.smiles(np_data$Smiles[1])
+  
+  if (!is.null(test_mol[[1]])) {
+    test_FP <- as.character(get.fingerprint(test_mol[[1]], type = fp_type, fp.mode = 'bit', verbose = FALSE))
+    test_FP <- strsplit(test_FP, split = "")
+    test_FP <- as.data.frame(test_FP)
+    test_FP <- t(test_FP)
+    
+    # Write header row: only Chembl_ID and then fingerprint bit columns (NO Name column)
+    cat("Chembl_ID,", file = output_file)
+    for (i in 1:(ncol(test_FP) - 1)) {
+      cat(sprintf("FP%d,", i), file = output_file)
+    }
+    cat(sprintf("FP%d\n", ncol(test_FP)), file = output_file)
+  }
+  
+  # Loop through all compounds in the natural product dataset
+  for (i in seq_len(nrow(np_data))) {
+    # Parse the SMILES string to obtain a molecule object
+    mol <- parse.smiles(np_data$Smiles[i])
+    if (!is.null(mol[[1]])) {
+      
+      # Generate fingerprint
+      FP <- as.character(get.fingerprint(mol[[1]], type = fp_type, fp.mode = 'bit', verbose = FALSE))
+      FP <- strsplit(FP, split = "")
+      FP <- as.data.frame(FP)
+      FP <- t(FP)
+      
+      # Extract Chembl_ID from the dataset (Name is not used in output)
+      chembl_id <- np_data$`ChEMBL ID`[i]
+      
+      # Write fingerprint data along with chembl_id
+      cat(sprintf("%s,%s\n", chembl_id, paste(FP[, 1:ncol(FP)], collapse = ",")), file = output_file)
+    }
+  }
+  
+  # Close the output file connection
+  close(output_file)
+  
+  cat(sprintf("Fingerprint generation complete for fingerprint type: %s\n", fp_type))
+}
+
+
+#' 

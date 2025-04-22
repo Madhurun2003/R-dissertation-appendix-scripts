@@ -1,0 +1,168 @@
+
+################################################################################
+############################# Load required packages #############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+Sys.setenv(JAVA_HOME = "C:/Users/madhu/OneDrive/Desktop/Madhurun/Downloads/jdk-21.0.5+11")
+library("rJava")
+library("rcdk")
+library("fingerprint")
+
+#' 
+
+################################################################################
+################################# Check dataset ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Read dataset
+COMP<-read.csv("datasets/ClinTox/ClinTox-CID-SMILES.csv")
+
+# Check the number of molecules
+moln<-nrow(COMP)
+
+#' 
+
+################################################################################
+## Test run to verify that the SMILES string can be parsed and fingerprints can be generated ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Ensure the fingerprint generation code works for one molecule before proceeding
+
+# Test molecule index
+i=10
+
+# Parse SMILES string for the test molecule
+mol=parse.smiles(COMP[i,4])
+
+FP=as.character(get.fingerprint(mol[[1]], type = 'extended',fp.mode = 'bit', verbose=FALSE))
+
+# Convert fingerprint to individual bits
+FP=strsplit(FP,split="")
+
+# 'as.data.frame(FP)' converts the list of bits into a data frame
+FP=as.data.frame(FP)
+
+# 't(FP)' transposes the data frame so that each column in the same row corresponds to a fingerprint bit
+FP=t(FP)
+
+# Check dimensions of generated fingerprint
+FPn = ncol(FP)
+str(FP)
+
+#' 
+
+################################################################################
+######################## Open the output file for writing ########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Open an output new CSV file ("ClinTox-FP-extended.csv") for writing fingerprints
+# - "w" indicates write 
+output_file = file("datasets/ClinTox/ClinTox-FP-extended.csv", "w")
+
+#' 
+
+################################################################################
+############################## Write the header row ##############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Write the header row for the CSV file
+# Start with writing "toxicity," and then add column names for each fingerprint (FP1, FP2, ..., FPn)
+cat(sprintf("toxicity,"), file = output_file)
+
+# Loop through fingerprint columns (excluding the last one as we don't want a comma on the end of the line and want a carriage return) and write their headers
+# - Write each fingerprint column name with a trailing comma
+for (i in 1:(ncol(FP) - 1)) {
+  cat(sprintf("FP%d,", i), file = output_file) 
+}
+
+# Write the final fingerprint column header (with a newline character to complete the header row)
+# - '\n' means carriage return
+cat(sprintf("FP%d\n", ncol(FP)), file = output_file)
+
+#' 
+
+################################################################################
+######### Process each molecule in the dataset to generate fingerprints  #########
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Loop through all rows in the dataset to calculate fingerprints for each compound
+for (i in 1:moln) {
+  
+  # Parse the SMILES string for the current molecule (column 4 in COMP contains the SMILES)
+  mol = parse.smiles(COMP[i, 4])
+  
+  # Check if the SMILES string was successfully parsed into a molecular object
+  if (!is.null(mol[[1]])) {
+    
+    # Generate the fingerprint for the molecular object (mol[[1]]) using the extended type
+    # Convert the fingerprint to a binary string
+    FP = as.character(get.fingerprint(mol[[1]], type = 'extended', fp.mode = 'bit', verbose = FALSE))
+    
+    # Split the binary string into individual characters (bits) to allow for manipulation
+    FP = strsplit(FP, split = "")
+    
+    # Convert the list of bits into a data frame
+    FP = as.data.frame(FP)
+    
+    # Transpose the data frame so that each column represents a fingerprint bit
+    FP = t(FP)
+    
+    # Assign a toxicity value based on the compound's label in column 3
+    # If the label is "Toxic," assign 1; if "Safe," assign 0; otherwise, assign -1 for invalid data entries
+    tox = -1
+    if (COMP[i, 3] == "Toxic") {
+      tox = 1
+    }
+    if (COMP[i, 3] == "Safe") {
+      tox = 0
+    }
+    
+    # Write/print the toxicity integer value '%d' and then the fingerprint bits to the CSV file 'file = output_file'
+    # - 'paste(FP[, 1:ncol(FP)]' extracts all the bits of the fingerprint 
+    # - 'collapse = ","' combines all bits into a single comma-separated string  and append to the toxicity value
+    cat(sprintf("%d,%s\n", tox, paste(FP[, 1:ncol(FP)], collapse = ",")), file = output_file)
+    
+    # Print a progress message to the console after each iteration
+    # flush.console() ensures that the message is displayed in real-time
+    # Note how 'file =fp' is not included hence it is printing to the console
+    cat("Completed iteration:", i, "\n")
+    flush.console()
+  }
+}
+
+# IMPORTANT: Close the CSV file after all rows have been processed
+close(output_file)
+
+#' 
+## -----------------------------------------------------------------------------
+# Check if file exists
+file.exists("datasets/ClinTox/ClinTox-FP-extended.csv")
+
+
+################################################################################
+######################### Check dataset activity splits ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Read the generated CSV file for ClinTox fingerprints
+clin_tox_data <- read.csv("datasets/ClinTox/ClinTox-FP-extended.csv", header = TRUE)
+
+# Verify the data structure
+str(clin_tox_data)
+
+# Count the frequency of each toxicity value (1 for Toxic, 0 for Safe, -1 for invalid)
+tox_counts <- table(clin_tox_data$toxicity)
+print(tox_counts)
+
+
+#' 
+## -----------------------------------------------------------------------------
+library(knitr)
+purl("scripts/fingerprints/R-ClinTox-FP-extended.Rmd", output = "scripts_txt/fingerprints/R-ClinTox-FP-extended.R", documentation = 0)
+

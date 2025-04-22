@@ -1,0 +1,232 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required libraries
+# Set up environment and import required libraries
+Sys.setenv(JAVA_HOME = "C:/Users/madhu/OneDrive/Desktop/Madhurun/Downloads/jdk-21.0.5+11")
+
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(ranger)
+library(rcdk)
+library(fingerprint)
+
+#' 
+
+################################################################################
+################## Train RF model on all of cleaned chembl-fp   ##################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# For each fingerprint type, train an RF model on the ChemBL organism-filtered dataset (for E. coli and S. aureus)
+
+# Define Fingerprint Types
+fingerprint_types <- c("maccs", "extended", "pubchem")
+
+chembl_rf_models <- list()
+
+for (fp_type in fingerprint_types) {
+  cat(sprintf("\nTraining ChemBL RF model for fingerprint type: %s\n", fp_type))
+  
+  # Load ChemBL fingerprint dataset (organism-filtered and overlap-removed)
+  chembl_fp <- read_csv(sprintf("outputs/filtered_assayed_antibacterial_%s_fingerprints.csv", fp_type), show_col_types = FALSE)
+  
+  # Ensure Actual_Activity is a factor with levels "Inactive" then "Active"
+  chembl_fp$Actual_Activity <- factor(chembl_fp$Actual_Activity, levels = c("Inactive", "Active"))
+  
+  # Identify fingerprint predictor columns (columns starting with "FP")
+  fp_columns <- grep("^FP", colnames(chembl_fp), value = TRUE)
+  
+  # Train the Random Forest model on 100% of the ChemBL data
+  RF_model <- ranger(
+    Actual_Activity ~ .,
+    data = chembl_fp[, c("Actual_Activity", fp_columns)],
+    probability = TRUE,
+    num.trees = 500,
+    importance = "impurity",
+    seed = 42
+  )
+  
+  chembl_rf_models[[fp_type]] <- RF_model
+  
+  # Save the trained model to disk
+  saveRDS(RF_model, sprintf("models/CHEMBL-RF-Model-%s-new.rds", fp_type))
+  cat(sprintf("ChemBL RF model for %s saved.\n", fp_type))
+}
+
+
+#' 
+
+################################################################################
+######################### Create lists to store results ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+all_stats <- list()
+combined_mean_tpr <- list()
+combined_mean_fpr <- list()
+auc_info <- list()
+
+#' 
+
+################################################################################
+################## Run fully trained chembl-fp RF model on S1B  ##################
+################################################################################
+
+## -----------------------------------------------------------------------------
+for (fp_type in fingerprint_types) {
+  
+  cat(sprintf("\nProcessing fingerprint type: %s\n", fp_type))
+  
+  # Load the trained ChemBL RF model
+  RF_model <- readRDS(sprintf("models/CHEMBL-RF-Model-%s-new.rds", fp_type))
+  
+  # Load the filtered S1B fingerprint dataset
+  s1b_fp <- read_csv(sprintf("datasets/Antibacterial/S1B/S1B-FP-%s.csv", fp_type),
+                     show_col_types = FALSE)
+  
+  # Convert the relevant activity column to a factor
+  s1b_fp$Actual_Activity <- as.factor(s1b_fp$Activity)
+  
+  # Identify fingerprint predictor columns (those starting with "FP")
+  fp_columns <- grep("^FP", colnames(s1b_fp), value = TRUE)
+  
+  # Predict class probabilities using the ChemBL-trained RF model
+  pred_probs <- predict(RF_model, data = s1b_fp[, fp_columns])$predictions
+  s1b_fp$Predicted_Probability <- pred_probs[, 2]
+  
+  # Determine predicted activity using a threshold of 0.5
+  s1b_fp$Predicted_Activity <- ifelse(s1b_fp$Predicted_Probability >= 0.5, "Active", "Inactive")
+  
+  # Convert predictions and actual labels to numeric (0 for Inactive, 1 for Active)
+  pred_numeric <- ifelse(s1b_fp$Predicted_Probability >= 0.5, 1, 0)
+  actual_numeric <- as.numeric(s1b_fp$Actual_Activity) - 1
+  
+  # Compute confusion matrix
+  cm <- table(Predicted = pred_numeric, Actual = actual_numeric)
+  cat(sprintf("\nConfusion Matrix for %s:\n", fp_type))
+  print(cm)
+  
+  # Calculate evaluation metrics
+  sensitivity <- cm["1", "1"] / sum(cm[, "1"])
+  specificity <- cm["0", "0"] / sum(cm[, "0"])
+  accuracy <- sum(diag(cm)) / sum(cm)
+  
+  # Compute ROC AUC manually
+  R <- data.frame(Actual = actual_numeric,
+                  Predicted = s1b_fp$Predicted_Probability) %>%
+       arrange(desc(Predicted))
+  
+  PN <- sum(R$Actual == 1)
+  N_total <- nrow(R)
+  TPR <- cumsum(R$Actual == 1) / PN
+  FPR <- cumsum(R$Actual == 0) / (N_total - PN)
+  ROC_AUC <- sum(diff(FPR) * TPR[-length(TPR)])
+  
+  # Compute AUPR using the trapezoidal rule
+  precision <- cumsum(R$Actual == 1) / seq_along(cumsum(R$Actual == 1))
+  recall <- cumsum(R$Actual == 1) / PN
+  delta_recall <- diff(c(0, recall))
+  AUPR <- sum(precision * delta_recall)
+  
+  # Save evaluation metrics
+  stats <- data.frame(
+    ROC_AUC = ROC_AUC,
+    AUPR = AUPR,
+    Sensitivity = sensitivity,
+    Specificity = specificity,
+    Accuracy = accuracy
+  )
+  rownames(stats) <- "Results"
+  all_stats[[fp_type]] <- stats
+  
+  # Save predictions and stats
+  write_csv(s1b_fp, sprintf("outputs/CHEMBL_RF_S1B_Predictions-%s.csv", fp_type))
+  write.csv(stats, sprintf("outputs/CHEMBL_RF_S1B_stats-%s.csv", fp_type), row.names = TRUE)
+  
+  # Store TPR/FPR for combined ROC plot
+  combined_mean_tpr[[fp_type]] <- TPR
+  combined_mean_fpr[[fp_type]] <- FPR
+  auc_info[[fp_type]] <- c(mean = ROC_AUC)
+  
+  # Plot individual ROC Curve
+  plot(FPR, TPR, type = "l", col = "blue", lwd = 2,
+       xlab = "False Positive Rate (FPR)", 
+       ylab = "True Positive Rate (TPR)",
+       main = sprintf("ROC Curve for %s", fp_type))
+  legend("bottomright", legend = sprintf("AUC: %.3f", ROC_AUC),
+         bty = "n", cex = 0.8)
+  
+  dev.copy(png, filename = sprintf("outputs/Mean_ROC_Curve_CHEMBL_S1B-%s.png", fp_type))
+  dev.off()
+}
+
+
+#' 
+
+################################################################################
+################################ Draw ROC curves  ################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+png("outputs/CHEMBL_RF_S1B_Combined_ROC.png", width = 8, height = 6, units = "in", res = 300)
+
+# Set margins and font sizes for axis labels and tick marks.
+par(mar = c(5, 6, 2, 2) + 0.1, cex.lab = 1.8, cex.axis = 1.6)
+
+# Define the ordered fingerprint types and corresponding colours.
+ordered_types <- c("maccs", "pubchem", "extended")
+colours <- c("blue", "red", "green")
+
+# Create an empty ROC plot without a title.
+plot(NULL, xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "False Positive Rate (FPR)",
+     ylab = "True Positive Rate (TPR)",
+     main = "")
+
+# Draw the mean ROC curves for each fingerprint type with thick lines.
+for (i in seq_along(ordered_types)) {
+  fp_type <- ordered_types[i]
+  lines(combined_mean_fpr[[fp_type]], combined_mean_tpr[[fp_type]],
+        col = colours[i], lwd = 5)
+}
+
+# Add a legend with enlarged text and thick line samples.
+legend("bottomright", 
+       legend = sapply(ordered_types, function(fp) {
+         sprintf("%s: AUC = %.3f", fp, auc_info[[fp]]["mean"])
+       }),
+       col = colours, lwd = 5, cex = 1.6, bty = "n", title = NULL)
+
+dev.off()
+
+
+
+
+################################################################################
+############################ Save performance metrics ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Combine all results into a single summary data frame
+combined_stats <- do.call(rbind, lapply(names(all_stats), function(fp) {
+  data.frame(
+    Fingerprint = fp, 
+    Metric = rownames(all_stats[[fp]]), 
+    all_stats[[fp]]
+  )
+}))
+
+# Save combined summary results
+write_csv(combined_stats, "outputs/CHEMBL_RF_S1B_Combined_Evaluation.csv")
+
+cat("RF model evaluation completed successfully for all fingerprint types.\n")
+print(combined_stats)
+
+

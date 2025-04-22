@@ -1,0 +1,115 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load libraries
+library(dplyr)
+library(readr)
+library(stats)
+
+#' 
+
+################################################################################
+########### Function to calculate Tanimoto similarity for fingerprints ###########
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Custom function to calculate Tanimoto similarity for binary fingerprints
+tanimoto_similarity <- function(vecA, vecB) {
+  # vecA, vecB are 0/1 integer vectors
+  common_bits <- sum(vecA & vecB)         # positions where both are 1
+  sumA <- sum(vecA)
+  sumB <- sum(vecB)
+  
+  denom <- (sumA + sumB - common_bits)
+  if (denom == 0) {
+    return(0)  # if everything is zero, define similarity as 0
+  } else {
+    return(common_bits / denom)
+  }
+}
+
+#' 
+
+################################################################################
+## Compute Tanimoto similarity among top 20 highest neuroprotective scoring natural products ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load the extended fingerprint file
+data_file <- "outputs/np_RF_CHEMBL_Predictions_with_BBB_and_ClinTox-extended.csv"
+extended_data <- read_csv(data_file, show_col_types = FALSE)
+
+# Select the top 20 by Neuroprotective Predicted_Probability
+top20 <- extended_data %>%
+  arrange(desc(Predicted_Probability)) %>%
+  slice_head(n = 20)
+
+# Identify fingerprint columns
+fp_cols <- grep("^FP", colnames(top20), value = TRUE)
+
+# Convert just the fingerprint columns to a matrix of 0/1
+fp_matrix <- as.matrix(top20[, fp_cols])
+
+# Compute Tanimoto similarity among the 20 compounds
+n <- nrow(fp_matrix)
+sim_matrix <- matrix(0, nrow = n, ncol = n)
+
+for (i in seq_len(n)) {
+  for (j in seq_len(n)) {
+    if (i <= j) {
+      sim_val <- tanimoto_similarity(fp_matrix[i, ], fp_matrix[j, ])
+      sim_matrix[i, j] <- sim_val
+      sim_matrix[j, i] <- sim_val
+    }
+  }
+}
+
+# Convert similarity to distance (distance = 1 - similarity)
+dist_matrix <- 1 - sim_matrix
+
+#' 
+
+################################################################################
+## Perform hierarchical clustering to obtain a representative within each cluster ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Perform hierarchical clustering
+hc <- hclust(as.dist(dist_matrix), method = "average")
+
+# Plot dendrogram
+plot(hc, labels = top20$ChEMBL_ID, main = "Hierarchical Clustering of Top 20 (Extended FP)")
+
+# Assign clusters based on a Tanimoto threshold
+# Tanimoto >= 0.9 => distance <= 0.1
+# Cut the tree at h = 0.1 to merge all pairs with distance <= 0.1
+clust_threshold <- 0.1
+clusters <- cutree(hc, h = clust_threshold)
+
+# Combine cluster info back with top20
+top20_clusters <- top20 %>%
+  mutate(Cluster = clusters) %>%
+  select(Chembl_ID, Predicted_Probability, BBB_Predicted_Probability,
+         ClinTox_Predicted_Probability, Cluster)
+
+cat("\nCluster assignments:\n")
+print(top20_clusters)
+
+# Select a representative for each cluster
+# Pick the compound with the highest Predicted_Probability
+representatives <- top20_clusters %>%
+  group_by(Cluster) %>%
+  slice_max(Predicted_Probability, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+cat("\nCluster Representatives (highest NP probability in each cluster):\n")
+print(representatives)
+
+# Save to CSV
+write_csv(representatives, "outputs/top20_cluster_reps.csv")
+
+
+#' 

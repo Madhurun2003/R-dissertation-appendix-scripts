@@ -1,0 +1,215 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required packages
+library(ranger)    # Random Forest classifier
+library(readr)     # CSV reading
+library(dplyr)     # Data wrangling
+library(ggplot2)   # Plotting
+library(tidyr)     # Data transformation
+library(PMCMRplus) # Statistical tests
+
+
+#' 
+
+################################################################################
+######################### Create lists to store results ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Store metrics for each fingerprint
+all_stats <- list()
+
+# Store ROC data for each fingerprint (for superimposed plot)
+combined_mean_tpr <- list()
+combined_mean_fpr <- list()
+auc_info <- list()
+
+#' 
+
+################################################################################
+###### Train-test 70/30 RF model on cleaned Chembl neuroprotectives dataset ######
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types
+fingerprint_types <- c("maccs", "extended", "pubchem")
+
+# Number of iterations
+n_iter <- 5
+
+# Loop through each fingerprint type
+for (fp_type in fingerprint_types) {
+  cat(sprintf("\nProcessing fingerprint type: %s\n", fp_type))
+  
+  # Load precomputed fingerprint dataset
+  fIN <- sprintf("outputs/neuroprotective_%s_fingerprints.csv", fp_type)
+  neuro_fp <- read_csv(fIN, show_col_types = FALSE) %>% select(-Chembl_ID)
+  
+  # Convert activity labels to factor (for RF classification)
+  neuro_fp$Actual_Activity <- factor(neuro_fp$Actual_Activity, levels = c("Inactive", "Active"))
+  fp_columns <- grep("^FP", names(neuro_fp), value = TRUE)
+  
+  # Prepare stats matrix
+  stats <- matrix(0, nrow = n_iter + 2, ncol = 5)
+  colnames(stats) <- c("ROC_AUC", "AUPR", "Sensitivity", "Specificity", "Accuracy")
+  rownames(stats) <- c(paste0("Run_", 1:n_iter), "Mean", "SD")
+  
+  # ROC data storage
+  all_tpr <- list()
+  all_fpr <- list()
+  
+  # Model training over multiple iterations
+  for (i in 1:n_iter) {
+    set.seed(i)
+    
+    # Split data: 70% train, 30% test
+    train_idx <- sample(nrow(neuro_fp), 0.7 * nrow(neuro_fp))
+    TrainSet <- neuro_fp[train_idx, ]
+    ValidSet <- neuro_fp[-train_idx, ]
+    
+    # Train Random Forest model
+    RF <- ranger(
+      Actual_Activity ~ ., 
+      data = TrainSet[, c("Actual_Activity", fp_columns)], 
+      probability = TRUE
+    )
+    
+    # Predict on validation data
+    pred_probs <- predict(RF, data = ValidSet[, fp_columns])$predictions
+    pred_class <- ifelse(pred_probs[, 2] > 0.5, 1, 0)
+    
+    # Confusion matrix + metrics
+    conf <- table(Predicted = pred_class, Actual = as.numeric(ValidSet$Actual_Activity) - 1)
+    sensitivity <- conf[2, 2] / sum(conf[, 2])
+    specificity <- conf[1, 1] / sum(conf[, 1])
+    accuracy <- sum(diag(conf)) / sum(conf)
+    
+    # ROC and AUPR computation
+    R <- data.frame(Actual = as.numeric(ValidSet$Actual_Activity) - 1, Predicted = pred_probs[, 2])
+    R <- R[order(-R$Predicted), ]
+    PN <- sum(R$Actual == 1); N <- nrow(R)
+    TPR <- cumsum(R$Actual == 1) / PN
+    FPR <- cumsum(R$Actual == 0) / (N - PN)
+    precision <- cumsum(R$Actual == 1) / (1:N)
+    recall <- cumsum(R$Actual == 1) / PN
+    delta_recall <- diff(c(0, recall))
+    
+    ROC_AUC <- sum(diff(FPR) * TPR[-length(TPR)])
+    AUPR <- sum(precision * delta_recall)
+    
+    stats[i, ] <- c(ROC_AUC, AUPR, sensitivity, specificity, accuracy)
+    all_tpr[[i]] <- TPR
+    all_fpr[[i]] <- FPR
+  }
+  
+  # Calculate mean and SD
+  stats[n_iter + 1, ] <- colMeans(stats[1:n_iter, ])
+  stats[n_iter + 2, ] <- apply(stats[1:n_iter, ], 2, sd)
+  all_stats[[fp_type]] <- stats
+  
+  # Export stats
+  write.csv(stats, sprintf("outputs/neuroprotective_RF_stats_%s.csv", fp_type), row.names = TRUE)
+  
+  # Store mean ROC curves for superimposed plot
+  combined_mean_tpr[[fp_type]] <- Reduce("+", all_tpr) / n_iter
+  combined_mean_fpr[[fp_type]] <- Reduce("+", all_fpr) / n_iter
+  auc_info[[fp_type]] <- c(mean = stats[n_iter + 1, 1], sd = stats[n_iter + 2, 1])
+}
+
+
+
+################################################################################
+################################ Draw ROC curves #################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+png("outputs/Neuroprotectives_ChEMBL_RF_Mean_ROC_Curves.png", width = 8, height = 6, units = "in", res = 300)
+
+# Set margins for improved readability.
+par(mar = c(5, 6, 2, 2) + 0.1, cex.lab = 1.8, cex.axis = 1.6)
+
+# Define the fingerprint types in the desired order and their corresponding colours.
+ordered_types <- c("maccs", "pubchem", "extended")
+colours <- c("blue", "red", "green")
+
+# Create an empty ROC plot with axis labels (no on-figure title).
+plot(NULL, xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "False Positive Rate (FPR)",
+     ylab = "True Positive Rate (TPR)",
+     main = "")
+
+# Draw mean ROC curves for each fingerprint type using thick lines.
+for (i in seq_along(ordered_types)) {
+  fp_type <- ordered_types[i]
+  lines(combined_mean_fpr[[fp_type]], combined_mean_tpr[[fp_type]],
+        col = colours[i], lwd = 5)
+}
+
+# Add an enlarged legend with AUC ± SD values.
+legend("bottomright", 
+       legend = sapply(ordered_types, function(fp) {
+         sprintf("%s: AUC = %.3f ± %.3f", fp, auc_info[[fp]]["mean"], auc_info[[fp]]["sd"])
+       }),
+       col = colours, lwd = 5, cex = 1.6, bty = "n", title = NULL)
+
+dev.off()
+
+
+#' 
+
+################################################################################
+############################ Save performance metrics ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Bind all metrics into one data frame
+combined_eval <- do.call(rbind, lapply(names(all_stats), function(fp) {
+  data.frame(Fingerprint = fp,
+             Metric = rownames(all_stats[[fp]]),
+             all_stats[[fp]])
+}))
+
+# Save and view
+write_csv(combined_eval, "outputs/RF_Neuroprotective_Combined_Evaluation.csv")
+print(combined_eval)
+
+
+#' 
+
+################################################################################
+############################ Run statistical analysis ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load evaluation results
+eval_data <- read_csv("outputs/RF_Neuroprotective_Combined_Evaluation.csv", show_col_types = FALSE)
+
+# Filter Run-level rows
+run_data <- eval_data %>%
+  filter(grepl("^Run_", Metric)) %>%
+  select(Fingerprint, Metric, ROC_AUC)
+
+# Wide-format: Each column = fingerprint type
+auc_wide <- run_data %>%
+  pivot_wider(names_from = Fingerprint, values_from = ROC_AUC)
+
+# Convert to matrix for test
+auc_matrix <- as.matrix(auc_wide[,-1])
+rownames(auc_matrix) <- auc_wide$Metric
+colnames(auc_matrix) <- c("maccs", "extended", "pubchem")
+
+# Friedman test
+friedman_result <- friedman.test(auc_matrix)
+print("Friedman test result:")
+print(friedman_result)
+
+# Post-hoc: Nemenyi test
+nemenyi_result <- frdAllPairsNemenyiTest(auc_matrix)
+print("Nemenyi post-hoc result:")
+print(nemenyi_result)
+
+

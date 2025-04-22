@@ -1,0 +1,195 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load necessary libraries
+library(dplyr)
+library(readr)
+library(httr)
+library(jsonlite)
+
+
+#' 
+
+################################################################################
+####################### Load cluster representatives file ########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Read the cluster reps CSV 
+cluster_reps_file <- "outputs/top20_cluster_reps.csv"
+df_cluster_reps <- read_csv(cluster_reps_file, show_col_types = FALSE)
+
+# Extract the ChEMBL IDs from the cluster reps
+clustered_chembl_ids <- df_cluster_reps$Chembl_ID
+
+
+#' 
+
+################################################################################
+############ Define function to get target info for a single compound ############
+################################################################################
+
+## -----------------------------------------------------------------------------
+get_targets_for_compound <- function(molecule_id) {
+  # Build URL: We can query the Activity endpoint with ?molecule_chembl_id=
+  base_url <- "https://www.ebi.ac.uk/chembl/api/data/activity.json"
+  query_url <- paste0(base_url, "?molecule_chembl_id=", molecule_id, "&limit=1000")
+  
+  response <- GET(query_url)
+  
+  if (status_code(response) == 200) {
+    # Convert response to text, then parse JSON
+    data_txt <- content(response, as = "text")
+    json_data <- fromJSON(data_txt)
+    
+    if (!is.null(json_data$activities)) {
+      target_data <- data.frame(
+        molecule_chembl_id = json_data$activities$molecule_chembl_id,
+        assay_chembl_id = json_data$activities$assay_chembl_id,
+        target_chembl_id   = json_data$activities$target_chembl_id,
+        target_organism    = json_data$activities$target_organism,
+        standard_type      = json_data$activities$standard_type,
+        standard_value     = json_data$activities$standard_value,
+        standard_units     = json_data$activities$standard_units,
+        stringsAsFactors   = FALSE
+      )
+      return(target_data)
+    }
+  }
+  cat("Failed or empty data for compound:", molecule_id, "\n")
+  return(NULL)
+}
+
+
+#' 
+
+################################################################################
+######### Loop over the top representatives ChEMBL IDs and fetch targets #########
+################################################################################
+
+## -----------------------------------------------------------------------------
+all_target_info <- data.frame()
+
+for (chembl_id in clustered_chembl_ids) {
+  cat("Fetching targets for:", chembl_id, "\n")
+  tmp <- get_targets_for_compound(chembl_id)
+  if (!is.null(tmp)) {
+    all_target_info <- rbind(all_target_info, tmp)
+  }
+}
+
+cat("\nCombined Target Info (All Organisms):\n")
+print(head(all_target_info, 20))
+
+# Save to CSV if desired
+write_csv(all_target_info, "top20_cluster_reps_target_info.csv")
+
+#' 
+
+################################################################################
+############################ Filter for Homo sapiens #############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+human_target_info <- all_target_info %>%
+  filter(target_organism == "Homo sapiens")
+
+cat("\nFiltered Target Info (Homo sapiens only):\n")
+print(human_target_info)
+
+#' 
+#' 
+
+################################################################################
+######################### Summarise Targets by Compound ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+compound_target_summary <- human_target_info %>%
+  group_by(molecule_chembl_id) %>%
+  summarise(
+    targets          = paste(unique(target_chembl_id), collapse = "; "),
+    target_organisms = paste(unique(target_organism), collapse = "; "),
+    standard_types   = paste(unique(standard_type), collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  arrange(molecule_chembl_id)
+
+cat("\n=== Targets (Homo sapiens) for Each Cluster Rep ===\n")
+print(compound_target_summary)
+
+write_csv(compound_target_summary, "top20_cluster_reps_target_summary_human.csv")
+
+#' 
+
+################################################################################
+############## Look for overlaps of targets across representatives ###############
+################################################################################
+
+## -----------------------------------------------------------------------------
+target_counts <- human_target_info %>%
+  group_by(target_chembl_id, target_organism) %>%
+  summarise(
+    count     = n_distinct(molecule_chembl_id), 
+    molecules = paste(unique(molecule_chembl_id), collapse = "; "),
+    .groups   = "drop"
+  ) %>%
+  arrange(desc(count))
+
+cat("\n=== Human Targets Mentioned by Multiple Cluster Reps ===\n")
+print(target_counts)
+
+#' 
+
+################################################################################
+################ Observe activity rows for the overlapping target ################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Specify target of interest: CHEMBL1293278
+my_target_of_interest <- "CHEMBL1293278"
+
+# Filter the human_target_info data frame for the target of interest
+target_activities <- human_target_info %>%
+  filter(target_chembl_id == my_target_of_interest)
+
+cat("\n=== All activity rows for target:", my_target_of_interest, "===\n")
+print(target_activities)
+
+#' 
+
+################################################################################
+################## Query Chembl API for specific assay records ###################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# A helper function to get assay details:
+get_assay_details <- function(assay_id) {
+  url <- paste0("https://www.ebi.ac.uk/chembl/api/data/assay/", assay_id, ".json")
+  resp <- httr::GET(url)
+  if (httr::status_code(resp) == 200) {
+    data_txt <- httr::content(resp, as = "text", encoding = "UTF-8")
+    data_json <- jsonlite::fromJSON(data_txt)
+    return(data_json)
+  } else {
+    warning("Failed to retrieve data for assay: ", assay_id)
+    return(NULL)
+  }
+}
+
+# For assay of interests:
+assay_ids <- c("CHEMBL2114843", "CHEMBL2114780")
+for (aid in assay_ids) {
+  cat("Details for Assay:", aid, "\n")
+  details <- get_assay_details(aid)
+  print(details)  # Inspect the returned JSON structure in R
+  cat("\n---\n")
+}
+
+
+#' 
+#' 
+#' 

@@ -1,0 +1,56 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required packages
+library(ranger)
+library(dplyr)
+library(readr)
+library(ggplot2)
+
+#' 
+
+################################################################################
+###################### Fully train BBB Random Forest model #######################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types
+FPtypes <- c("pubchem", "extended", "maccs")
+
+# Loop through each fingerprint type and train a model on 100% of the data
+for (FPtype in FPtypes) {
+  
+  cat(sprintf("\nTraining BBB 100%% RF model for fingerprint type: %s\n", FPtype))
+  
+  # Construct the input file path
+  fIN <- sprintf("datasets/BBBp/BBBp-%s.csv", FPtype)
+  
+  # Read the CSV
+  d <- read.csv(fIN)
+  
+  # Remove the first column (compound names) and any rows with missing values
+  d <- d[, 2:ncol(d)]
+  d <- na.omit(d)
+  
+  # Convert the target variable 'p_np' to a factor
+  d$p_np <- as.factor(d$p_np)
+  
+  # Train the Random Forest on the entire dataset
+  RF_model <- ranger(
+    p_np ~ .,
+    data = d,
+    probability = TRUE,   # Probability mode for classification 
+    importance = "impurity",
+    seed = 42             # For reproducibility
+  )
+  
+  # Save the trained model as an RDS file
+  saveRDS(RF_model, sprintf("models/BBB-RF-Model-%s-100.rds", FPtype))
+  cat(sprintf("BBB 100%% RF model for %s saved.\n", FPtype))
+}
+
+
+#' 

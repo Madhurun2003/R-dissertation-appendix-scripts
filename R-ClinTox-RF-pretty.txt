@@ -1,0 +1,225 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Load required libraries
+# 'ranger' for Random Forest classification
+# 'ggplot2' for plotting 
+# 'dplyr', 'readr', and 'tidyr' for data manipulation
+library(ranger)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(tidyr)
+
+
+#' 
+
+################################################################################
+############################ Store lists for metrics #############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Initialise storage lists for performance metrics and ROC data
+all_stats <- list()              # Stores performance metrics (AUC, AUPR, etc.)
+all_conf_matrices <- list()      # Stores confusion matrices for each iteration
+combined_mean_tpr <- list()      # Stores averaged TPRs across iterations
+combined_mean_fpr <- list()      # Stores averaged FPRs across iterations
+auc_info <- list()               # Stores AUC mean and standard deviation
+
+
+#' 
+
+################################################################################
+################ Train and test ClinTox 70/30 Random Forest model ################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Define fingerprint types to process
+FPtypes <- c("pubchem", "extended", "maccs")
+
+# Loop over each fingerprint type and build Random Forest model
+for (FPtype in FPtypes) {
+  cat(sprintf("Processing fingerprint type: %s\n", FPtype))  # Logging progress
+  
+  # Load dataset corresponding to the fingerprint type
+  fIN <- sprintf("datasets/ClinTox/ClinTox-FP-%s.csv", FPtype)
+  d <- read.csv(fIN)
+  d <- na.omit(d)  # Remove missing values
+  
+  # Convert binary target column to factor for classification
+  d$toxicity <- as.factor(d$toxicity)
+  
+  # Define number of training iterations
+  n_iter <- 5
+  
+  # Create matrix to store model performance stats per run + mean + SD
+  stats <- matrix(0, nrow = n_iter + 2, ncol = 5)
+  colnames(stats) <- c("ROC_AUC", "AUPR", "Sensitivity", "Specificity", "Accuracy")
+  rownames(stats) <- c(paste0("Run_", 1:n_iter), "Mean", "SD")
+  
+  # Prepare list storage for ROC calculations
+  all_tpr <- list()
+  all_fpr <- list()
+  all_conf_matrices[[FPtype]] <- list()
+  
+  # Train and evaluate model over multiple iterations
+  for (iteration in 1:n_iter) {
+    cat(sprintf("Iteration %d\n", iteration))  # Log each run
+    
+    # Randomly split data (70% train / 30% validate)
+    set.seed(123 + iteration)
+    train_idx <- sample(nrow(d), 0.7 * nrow(d), replace = FALSE)
+    TrainSet <- d[train_idx, ]
+    ValidSet <- d[-train_idx, ]
+    
+    # Train Random Forest
+    RF <- ranger(
+      toxicity ~ .,
+      data = TrainSet,
+      importance = "impurity",   
+      probability = TRUE         # Required to get probability predictions
+    )
+    
+    # Predict probabilities and convert to binary classes
+    predValid <- predict(RF, ValidSet)$predictions
+    predClassValid <- ifelse(predValid[, 2] > 0.5, 1, 0)
+    
+    # Generate confusion matrix
+    confusion_matrix <- table(Predicted = predClassValid, Actual = as.numeric(ValidSet$toxicity) - 1)
+    print(sprintf("Confusion Matrix for %s - Run %d:", FPtype, iteration))
+    print(confusion_matrix)
+    
+    # Compute metrics from confusion matrix
+    sensitivity <- confusion_matrix[2, 2] / sum(confusion_matrix[, 2])  # TPR
+    specificity <- confusion_matrix[1, 1] / sum(confusion_matrix[, 1])  # TNR
+    accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)    # Overall
+    
+    # Compute ROC metrics
+    R <- data.frame(Actual = as.numeric(ValidSet$toxicity) - 1, Predicted = predValid[, 2])
+    R <- R[order(-R$Predicted), ]
+    PN <- sum(R$Actual == 1)
+    N <- nrow(R)
+    TPR <- cumsum(R$Actual == 1) / PN
+    FPR <- cumsum(R$Actual == 0) / (N - PN)
+    
+    # Compute AUC (ROC) and AUPR
+    ROC_AUC <- sum(diff(FPR) * TPR[-length(TPR)])
+    precision <- cumsum(R$Actual == 1) / (1:N)
+    recall <- cumsum(R$Actual == 1) / PN
+    delta_recall <- diff(c(0, recall))
+    AUPR <- sum(precision * delta_recall)
+    
+    # Store metrics for this run
+    stats[iteration, ] <- c(ROC_AUC, AUPR, sensitivity, specificity, accuracy)
+    all_tpr[[iteration]] <- TPR
+    all_fpr[[iteration]] <- FPR
+  }
+  
+  # Compute mean and SD across runs
+  stats[n_iter + 1, ] <- colMeans(stats[1:n_iter, ])
+  stats[n_iter + 2, ] <- apply(stats[1:n_iter, ], 2, sd)
+  all_stats[[FPtype]] <- stats
+  
+  # Save per-fingerprint performance to CSV
+  write.csv(stats, file = sprintf("outputs/ClinTox_RF_stats_%s.csv", FPtype), row.names = TRUE)
+  
+  # Average ROC curves for this fingerprint
+  mean_tpr <- Reduce("+", all_tpr) / n_iter
+  mean_fpr <- Reduce("+", all_fpr) / n_iter
+  combined_mean_tpr[[FPtype]] <- mean_tpr
+  combined_mean_fpr[[FPtype]] <- mean_fpr
+  auc_info[[FPtype]] <- c(mean = stats[n_iter + 1, 1], sd = stats[n_iter + 2, 1])
+}
+
+
+
+################################################################################
+################################ Draw ROC curves  ################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+png("outputs/Combined_ROC_Curves_ClinTox.png", width = 8, height = 6, units = "in", res = 300)
+
+par(mar = c(5, 6, 2, 2) + 0.1, cex.lab = 1.8, cex.axis = 1.6)
+
+colours <- c("blue", "red", "green")
+
+plot(NULL, xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "False Positive Rate (FPR)",
+     ylab = "True Positive Rate (TPR)", 
+     main = "")
+
+for (i in seq_along(FPtypes)) {
+  lines(combined_mean_fpr[[FPtypes[i]]], combined_mean_tpr[[FPtypes[i]]],
+        col = colours[i], lwd = 5)
+}
+
+legend("bottomright",
+       legend = sapply(FPtypes, function(fp) sprintf("%s: %.3f ± %.3f", fp, auc_info[[fp]]["mean"], auc_info[[fp]]["sd"])),
+       col = colours, lwd = 5, cex = 1.6, bty = "n", title = NULL)
+
+dev.off()
+
+
+
+################################################################################
+############################ Save performance metrics ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Combine and export final performance table for all fingerprints
+
+combined_clintox_stats <- do.call(rbind, lapply(names(all_stats), function(fp) {
+  data.frame(
+    Fingerprint = fp,
+    Metric = rownames(all_stats[[fp]]),
+    all_stats[[fp]]
+  )
+}))
+
+# Write the full evaluation table
+write_csv(combined_clintox_stats, "outputs/ClinTox_RF_Combined_Evaluation.csv")
+print(combined_clintox_stats)
+print("ClinTox RF model training and evaluation completed successfully.")
+
+
+#' 
+
+################################################################################
+############################ Run statistical analysis ############################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Statistical comparison of ROC AUCs across fingerprints
+
+library(PMCMRplus)
+
+# Filter and pivot run-level ROC_AUC values
+run_data <- combined_clintox_stats %>%
+  filter(grepl("^Run_", Metric)) %>%
+  select(Fingerprint, Metric, ROC_AUC) %>%
+  pivot_wider(names_from = Fingerprint, values_from = ROC_AUC)
+
+# Convert to matrix
+auc_matrix <- as.matrix(run_data[, -1])
+rownames(auc_matrix) <- run_data$Metric
+colnames(auc_matrix) <- c("maccs", "extended", "pubchem")
+
+# Friedman test
+friedman_result <- friedman.test(auc_matrix)
+print(friedman_result)
+
+# Nemenyi post-hoc test
+result_nemenyi <- frdAllPairsNemenyiTest(auc_matrix)
+print(result_nemenyi)
+
+
+#' 
+## -----------------------------------------------------------------------------
+library(knitr)
+purl("scripts/random_forests/R-ClinTox-RF.Rmd", output = "scripts_txt/random_forests/R-ClinTox-RF.R", documentation = 0)
+
+#' 

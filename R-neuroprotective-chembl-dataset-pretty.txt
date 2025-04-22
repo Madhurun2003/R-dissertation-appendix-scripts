@@ -1,0 +1,199 @@
+
+################################################################################
+################### Fetch neuroprotective assay compound data ####################
+################################################################################
+
+## -----------------------------------------------------------------------------
+get_neuro_compound_data_for_assay <- function(assay_chembl_id) {
+  url <- paste0("https://www.ebi.ac.uk/chembl/api/data/activity.json?assay_chembl_id=",
+                assay_chembl_id, "&limit=10000")
+  response <- GET(url)
+  if (status_code(response) == 200) {
+    data <- content(response, as = "text", encoding = "UTF-8")
+    json_data <- fromJSON(data)
+    if (!is.null(json_data$activities)) {
+      compound_data <- data.frame(
+        assay_chembl_id = assay_chembl_id,
+        Chembl_ID = json_data$activities$molecule_chembl_id,
+        SMILES = json_data$activities$canonical_smiles,  
+        Standard_Value = as.numeric(json_data$activities$standard_value),
+        Standard_Units = json_data$activities$standard_units,
+        Activity_Type = json_data$activities$standard_type,
+        pChEMBL = as.numeric(json_data$activities$pchembl_value)
+      )
+      return(compound_data)
+    }
+  }
+  return(NULL)
+}
+
+# Read Chembl assay ID file
+neuro_assays <- read.table("datasets/DOWNLOAD-EWLEVakeKUPUWZLZEuZc51bsNk2O3TjGuBRpyBWx6No=.csv", sep = ";")
+
+# Extract assay IDs from second row
+assay_chembl_ids <- neuro_assays[2:nrow(neuro_assays), 1]
+
+# Apply the function to each assay ID to fetch compound data
+all_neuro_compounds <- lapply(assay_chembl_ids, get_neuro_compound_data_for_assay)
+
+# Combine all returned data frames into one and filter out rows missing values
+neuro_compounds <- bind_rows(all_neuro_compounds) %>%
+  filter(!is.na(Standard_Value)) %>% 
+  filter(!is.na(Standard_Units))
+
+# Save the raw dataset to CSV file
+write.csv(neuro_compounds, "outputs/CHEMBLcompounds-neuroprotectives_raw.csv", row.names = FALSE)
+
+#' 
+
+################################################################################
+########## Check dataset for activity type, units and unique chembl IDs ##########
+################################################################################
+
+## -----------------------------------------------------------------------------
+library(readr)
+library(dplyr)
+library(rcdk)  
+
+# Load the saved raw dataset
+neuro_data <- read_csv("datasets/Neuroprotectives/CHEMBLcompounds-neuroprotectives_raw.csv")
+
+# Remove the pChEMBL column 
+neuro_data <- neuro_data %>% 
+  select(-pChEMBL)
+
+# Count how many records exist for each Activity_Type and Standard_Units combination
+activity_summary <- neuro_data %>%
+  group_by(Activity_Type, Standard_Units) %>%
+  summarise(
+    num_records = n(),   # total number of rows
+    num_compounds = n_distinct(Chembl_ID) # unique ChEMBL IDs
+  ) %>%
+  arrange(desc(num_records))  # sort in descending order of row count
+
+# Print the summary
+print(activity_summary)
+
+#' 
+
+################################################################################
+################ Filter out compounds with high molecular weight #################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Compute Molecular weight
+neuro_data$Molecular_Weight <- NA  # Initialise MW column
+
+# Remove rows with missing SMILES
+neuro_data <- neuro_data[!is.na(neuro_data$SMILES), ]
+
+# Loop through compounds and parse SMILES string to extract MW
+for (i in 1:nrow(neuro_data)) {
+  molecule <- parse.smiles(neuro_data$SMILES[i])[[1]] # extracts the first element returned by parse.smiles
+  if (!is.null(molecule)) {
+    neuro_data$Molecular_Weight[i] <- get.mol2formula(molecule)@mass
+  }
+}
+
+# Filter out compounds with high molecular weight (e.g., > 900 Da)
+neuro_data <- neuro_data %>% filter(Molecular_Weight <= 900)
+
+
+#' 
+
+################################################################################
+####################### Filter on activity type and units ########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Filter dataset based on activity type and the units:
+neuro_data_filtered <- neuro_data %>%
+  filter(
+    (Activity_Type == "Activity" & Standard_Units == "%") |
+    (Activity_Type == "Inhibition" & Standard_Units == "%") |
+    (Activity_Type == "Survival" & Standard_Units == "%") |
+    (Activity_Type == "EC50" & Standard_Units %in% c("nM", "µM")) |
+    (Activity_Type == "IC50" & Standard_Units %in% c("nM", "µM"))
+  )
+
+
+# Vectorised classification using case_when
+neuro_data_activity <- neuro_data_filtered %>%
+  mutate(
+    # Converts IC50/EC50 to µM if in nM
+    value_um = case_when(
+      tolower(Activity_Type) %in% c("ic50", "ec50") & tolower(Standard_Units) == "nm" ~ Standard_Value / 1000,
+      tolower(Activity_Type) %in% c("ic50", "ec50") & tolower(Standard_Units) == "µm" ~ Standard_Value,
+      TRUE ~ NA_real_
+    ),
+    # Classify as Active or Inactive
+    Binary_Label = case_when(
+      # For IC50/EC50
+      !is.na(value_um) & value_um < 5 ~ "Active",
+      !is.na(value_um) & value_um >= 5 ~ "Inactive",
+
+      # For % Activity, Inhibition, Survival
+      tolower(Activity_Type) %in% c("activity", "inhibition", "survival") &
+        tolower(Standard_Units) == "%" & Standard_Value >= 60 ~ "Active",
+      tolower(Activity_Type) %in% c("activity", "inhibition", "survival") &
+        tolower(Standard_Units) == "%" & Standard_Value < 60 ~ "Inactive",
+
+      # Default
+      TRUE ~ "Inactive"
+    )
+  )
+
+#' 
+
+################################################################################
+########################### Filter duplicate ChemblIDs ###########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Lowest value_um for IC50/EC50 per Chembl ID
+potency_data <- neuro_data_activity %>%
+  filter(tolower(Activity_Type) %in% c("ic50", "ec50")) %>%
+  group_by(Chembl_ID) %>%
+  slice_min(order_by = value_um, with_ties = FALSE) %>%
+  ungroup()
+
+# Highest Standard_Value for Activity/Inhibition/Survival
+percent_data <- neuro_data_activity %>%
+  filter(tolower(Activity_Type) %in% c("activity", "inhibition", "suvival")) %>%
+  group_by(Chembl_ID) %>%
+  slice_max(order_by = Standard_Value, with_ties = FALSE) %>%
+  ungroup()
+
+# Combine both subsets
+final_compounds <- bind_rows(potency_data, percent_data)
+
+# If any measurement for a compound is labeled Active, the compound is Active
+compound_level <- final_compounds %>%
+  group_by(Chembl_ID) %>%
+  summarise(Actual_activity = if_else(any(Binary_Label == "Active"), "Active", "Inactive")) %>%
+  ungroup()
+
+# Merge compound-level activity with SMILES or other metadata from the original dataset
+final_dataset <- compound_level %>%
+  left_join(
+    neuro_data %>% 
+      select(Chembl_ID, SMILES) %>% 
+      distinct(Chembl_ID, .keep_all = TRUE), # returns all columns, not just the unique columns
+    by = "Chembl_ID"
+  )
+
+#' 
+
+################################################################################
+########################## Save and check final dataset ##########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Check how many compounds are labeled Active vs. Inactive
+print(table(final_dataset$Actual_activity))
+
+# Save the final dataset to a CSV
+write_csv(final_dataset, "outputs/cleaned_CHEMBLcompounds_neuroprotectives_final.csv")
+print("Final compound-level dataset saved.")
+
+#' 

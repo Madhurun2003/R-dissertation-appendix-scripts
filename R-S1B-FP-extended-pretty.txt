@@ -1,0 +1,157 @@
+
+################################################################################
+################################# Load packages ##################################
+################################################################################
+
+## -----------------------------------------------------------------------------
+Sys.setenv(JAVA_HOME = "C:/Users/madhu/OneDrive/Desktop/Madhurun/Downloads/jdk-21.0.5+11")
+library("rJava")
+library("rcdk")
+library("fingerprint")
+library("readxl")
+
+#' 
+
+################################################################################
+########################### Read and check S1B dataset ###########################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Read the S1B dataset from the provided Excel file
+# 'sheet = "S1B"' ensures we read only the S1B sheet
+s1b_data <- read_excel("datasets/Antibacterial/S1B_dataset.xlsx", sheet = "S1B", skip = 1)
+
+# Ensure there are no missing values
+s1b_data <- na.omit(s1b_data)
+
+# Verify the structure of the dataset
+print(colnames(s1b_data))  # Columns: Mean_Inhibition, SMILES, Name, Activity
+
+# Check the number of molecules
+moln <- nrow(s1b_data)
+
+#' 
+
+################################################################################
+## Ensure the fingerprint generation code works for one molecule before proceeding ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Test molecule index
+i = 10
+
+# Parse SMILES string for the test molecule
+mol <- parse.smiles(s1b_data$SMILES[i])
+
+# Generate extended fingerprint for the test molecule
+FP <- as.character(get.fingerprint(mol[[1]], type = 'extended', fp.mode = 'bit', verbose = FALSE))
+
+# Convert fingerprint to individual bits
+FP <- strsplit(FP, split = "")
+
+# Convert the list of bits into a data frame
+FP <- as.data.frame(FP)
+
+# Transpose the data frame so that each column represents a fingerprint bit
+FP <- t(FP)
+
+# Check dimensions of generated fingerprint
+FPn <- ncol(FP)
+
+
+#' 
+#' # Open CSV file for writing and write column headers
+## -----------------------------------------------------------------------------
+# Open an output CSV file ("S1B-FP-extended.csv") for writing fingerprints
+output_file <- file("datasets/Antibacterial/S1B-FP-extended.csv", "w")
+
+# Write the header row for the CSV file
+# Start with writing "Activity," followed by fingerprint columns (FP1, FP2, ..., FPn)
+cat(sprintf("Activity,"), file = output_file)
+
+# Write column headers for fingerprint bits
+for (i in 1:(ncol(FP) - 1)) {
+  cat(sprintf("FP%d,", i), file = output_file)
+}
+
+# Write the final fingerprint column header with a newline character
+cat(sprintf("FP%d\n", ncol(FP)), file = output_file)
+
+
+#' 
+
+################################################################################
+## Loop through all rows in the dataset to create fingerprints for each compound ##
+################################################################################
+
+## -----------------------------------------------------------------------------
+for (i in 1:moln) {
+  
+  # Parse the SMILES string for the current molecule
+  mol <- parse.smiles(s1b_data$SMILES[i])
+  
+  # Check if the SMILES string was successfully parsed into a molecular object
+  if (!is.null(mol[[1]])) {
+    
+    # Generate the extended fingerprint for the molecular object
+    FP <- as.character(get.fingerprint(mol[[1]], type = 'extended', fp.mode = 'bit', verbose = FALSE))
+    
+    # Split the binary string into individual characters (bits)
+    FP <- strsplit(FP, split = "")
+    
+    # Convert the list of bits into a data frame
+    FP <- as.data.frame(FP)
+    
+    # Transpose the data frame so that each column represents a fingerprint bit
+    FP <- t(FP)
+    
+    # Assign an activity value based on the "Activity" column in the dataset
+    # If "Active," assign 1; if "Inactive," assign 0
+    activity <- ifelse(s1b_data$Activity[i] == "Active", 1, 0)
+    
+    # Write the activity value followed by the fingerprint bits to the CSV file
+    cat(sprintf("%d,%s\n", activity, paste(FP[, 1:ncol(FP)], collapse = ",")), file = output_file)
+    
+    # Print a progress message to the console after each iteration
+    cat("Completed iteration:", i, "\n")
+    flush.console()
+  }
+}
+
+# Close the output CSV file after processing all rows
+close(output_file)
+
+
+#' 
+## -----------------------------------------------------------------------------
+# Check if the output file was successfully created
+file.exists("datasets/Antibacterial/S1B-FP-extended.csv")
+
+
+#' 
+
+################################################################################
+###################### Check activity split in the dataset #######################
+################################################################################
+
+## -----------------------------------------------------------------------------
+# Read the generated CSV file for the S1B dataset
+s1b_fp <- read.csv("datasets/Antibacterial/S1B/S1B-FP-extended.csv", header = TRUE)
+
+# Inspect the first few rows to confirm the data was loaded correctly
+head(s1b_fp)
+
+# Count the frequency of each activity value (1 for Active, 0 for Inactive)
+activity_counts <- table(s1b_fp$Activity)
+print(activity_counts)
+
+
+#' 
+## -----------------------------------------------------------------------------
+library(knitr)
+purl("scripts/fingerprints/R-S1B-FP-extended.Rmd", output = "scripts_txt/fingerprints/R-S1B-FP-extended.R", documentation = 0)
+
+
+#' 
+#' 
+#' 
